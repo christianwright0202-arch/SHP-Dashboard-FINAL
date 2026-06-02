@@ -277,7 +277,43 @@ function deriveProperty(pid, model) {
     [priorY]: priorY != null ? (byYear[priorY]?.[i]?.revenue ?? null) : null,
   })) : [];
   const ota = Object.entries(p.ota || {}).map(([name, value]) => ({ name, value }));
-  return { pid, meta, series, latest, prev, snap, yoy, years, curY, priorY, ota, raw: p };
+
+  // Live calendar awareness — recomputed every render, so it rolls over automatically each month.
+  const now = new Date();
+  const curMonthKey = mkey(now.getFullYear(), now.getMonth());
+  const prevD = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevMonthKey = mkey(prevD.getFullYear(), prevD.getMonth());
+  const cmRow = series.find((s) => s.key === curMonthKey);
+  const pmRow = series.find((s) => s.key === prevMonthKey);
+  const thisYear = now.getFullYear();
+  const ytd = series.filter((s) => s.year === thisYear && s.mIdx <= now.getMonth()).reduce((a, s) => a + (s.revenue || 0), 0);
+  const ytdPrior = series.filter((s) => s.year === thisYear - 1 && s.mIdx <= now.getMonth()).reduce((a, s) => a + (s.revenue || 0), 0);
+  const currentMonth = {
+    key: curMonthKey,
+    label: `${MONTHS[now.getMonth()]} ${thisYear}`,
+    revenue: cmRow ? (cmRow.revenue || 0) : 0,
+    prevRevenue: pmRow ? (pmRow.revenue || 0) : null,
+    has: !!cmRow,
+  };
+
+  return { pid, meta, series, latest, prev, snap, yoy, years, curY, priorY, ota, raw: p, currentMonth, ytd, ytdPrior, ytdYear: thisYear };
+}
+
+// Build the normalized 5-card KPI object for a single property
+function buildKpi(d) {
+  return {
+    currentMonthRevenue: d.currentMonth.revenue,
+    currentMonthLabel: d.currentMonth.label,
+    currentMonthDelta: delta(d.currentMonth.revenue, d.currentMonth.prevRevenue),
+    ytdRevenue: d.ytd,
+    ytdLabel: `${d.ytdYear} YTD`,
+    ytdDelta: d.ytdPrior > 0 ? delta(d.ytd, d.ytdPrior) : null,
+    occ: d.latest?.occ ?? null, adr: d.latest?.adr ?? null, revpar: d.latest?.revpar ?? null,
+    metricLabel: d.latest?.label || "—",
+    occDelta: delta(d.latest?.occ, d.prev?.occ),
+    adrDelta: delta(d.latest?.adr, d.prev?.adr),
+    revparDelta: delta(d.latest?.revpar, d.prev?.revpar),
+  };
 }
 
 function fmtMoney(v, d = 0) { if (v == null) return "—"; return "$" + Number(v).toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d }); }
@@ -480,29 +516,26 @@ function NavItem({ icon, label, active, onClick, color, dot }) {
 }
 
 /* ---------------- KPI cards ---------------- */
-function KpiRow({ d, accent }) {
-  const L = d?.latest;
-  const dRev = d?.prev ? delta(L?.revenue, d.prev.revenue) : null;
-  const dOcc = d?.prev ? delta(L?.occ, d.prev.occ) : null;
-  const dAdr = d?.prev ? delta(L?.adr, d.prev.adr) : null;
-  const dRp = d?.prev ? delta(L?.revpar, d.prev.revpar) : null;
+function KpiRow({ k, accent }) {
   const cards = [
-    { label: "Revenue", icon: <DollarSign size={16} />, val: fmtMoney(L?.revenue), dl: dRev },
-    { label: "Occupancy", icon: <Percent size={16} />, val: fmtPct(L?.occ), dl: dOcc },
-    { label: "ADR", icon: <BedDouble size={16} />, val: fmtMoney(L?.adr), dl: dAdr },
-    { label: "RevPAR", icon: <Gauge size={16} />, val: fmtMoney(L?.revpar), dl: dRp },
+    { label: "Current Month Revenue", sub: k.currentMonthLabel, icon: <DollarSign size={15} />, val: fmtMoney(k.currentMonthRevenue), dl: k.currentMonthDelta, dlLabel: "MoM" },
+    { label: "YTD Revenue", sub: k.ytdLabel, icon: <Calendar size={15} />, val: fmtMoney(k.ytdRevenue), dl: k.ytdDelta, dlLabel: "YoY" },
+    { label: "Occupancy", sub: k.metricLabel, icon: <Percent size={15} />, val: fmtPct(k.occ), dl: k.occDelta, dlLabel: "MoM" },
+    { label: "ADR", sub: k.metricLabel, icon: <BedDouble size={15} />, val: fmtMoney(k.adr), dl: k.adrDelta, dlLabel: "MoM" },
+    { label: "RevPAR", sub: k.metricLabel, icon: <Gauge size={15} />, val: fmtMoney(k.revpar), dl: k.revparDelta, dlLabel: "MoM" },
   ];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: 12 }}>
       {cards.map((c) => (
-        <div key={c.label} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: "18px 20px", borderTop: `3px solid ${accent}` }}>
-          <div className="ui" style={{ display: "flex", alignItems: "center", gap: 7, color: C.muted, fontSize: 12, fontWeight: 600, letterSpacing: .3, textTransform: "uppercase" }}>
-            <span style={{ color: accent }}>{c.icon}</span>{c.label}
+        <div key={c.label} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: "15px 16px", borderTop: `3px solid ${accent}` }}>
+          <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: .3, textTransform: "uppercase", lineHeight: 1.25, minHeight: 26 }}>
+            <span style={{ color: accent, flexShrink: 0 }}>{c.icon}</span>{c.label}
           </div>
-          <div style={{ fontFamily: "Georgia, serif", fontSize: 30, fontWeight: 700, marginTop: 8, color: C.ink }}>{c.val}</div>
+          <div style={{ fontFamily: "Georgia, serif", fontSize: 25, fontWeight: 700, marginTop: 7, color: C.ink }}>{c.val}</div>
+          <div className="ui" style={{ fontSize: 10.5, color: C.faint, marginTop: 2 }}>{c.sub}</div>
           {c.dl != null && (
-            <div className="ui" style={{ marginTop: 4, fontSize: 12.5, fontWeight: 600, color: c.dl >= 0 ? C.good : C.bad, display: "flex", alignItems: "center", gap: 4 }}>
-              {c.dl >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />} {(c.dl * 100).toFixed(1)}% MoM
+            <div className="ui" style={{ marginTop: 4, fontSize: 12, fontWeight: 600, color: c.dl >= 0 ? C.good : C.bad, display: "flex", alignItems: "center", gap: 4 }}>
+              {c.dl >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />} {(c.dl * 100).toFixed(1)}% {c.dlLabel}
             </div>
           )}
         </div>
@@ -596,20 +629,32 @@ function Empty({ text }) { return <div className="ui" style={{ color: C.faint, f
 /* ---------------- OVERVIEW ---------------- */
 function Overview({ model, hasData, onUpload, goto }) {
   const derived = useMemo(() => PROPERTIES.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model]);
-  // portfolio current-month rollup
-  const portfolio = useMemo(() => {
-    let rev = 0, nights = 0, avail = 0, adrW = 0, adrN = 0, occSum = 0, occN = 0;
+  // portfolio rollup -> 5-card KPI object
+  const portfolioKpi = useMemo(() => {
+    let cmRev = 0, ytdRev = 0, ytdPrior = 0;
+    let nights = 0, avail = 0, adrW = 0, adrN = 0, occSum = 0, occN = 0;
+    let cmLabel = "", ytdLabel = "";
     derived.forEach((d) => {
-      if (!d.latest) return; const L = d.latest;
-      rev += L.revenue || 0;
-      nights += L.nights || 0;
-      if (L.mIdx != null) { const days = daysInMonth(L.year, L.mIdx); avail += d.meta.units * days; }
-      if (L.adr != null) { adrW += L.adr * (L.nights || 1); adrN += (L.nights || 1); }
-      if (L.occ != null) { occSum += L.occ; occN++; }
+      cmRev += d.currentMonth.revenue || 0;
+      ytdRev += d.ytd || 0;
+      ytdPrior += d.ytdPrior || 0;
+      cmLabel = d.currentMonth.label; ytdLabel = `${d.ytdYear} YTD`;
+      const L = d.latest;
+      if (L) {
+        nights += L.nights || 0;
+        if (L.mIdx != null) { const days = daysInMonth(L.year, L.mIdx); avail += d.meta.units * days; }
+        if (L.adr != null) { adrW += L.adr * (L.nights || 1); adrN += (L.nights || 1); }
+        if (L.occ != null) { occSum += L.occ; occN++; }
+      }
     });
     const occ = avail ? Math.min(1, nights / avail) : (occN ? occSum / occN : null);
     const adr = adrN ? adrW / adrN : null;
-    return { latest: { revenue: rev, occ, adr, revpar: adr && occ ? adr * occ : null, nights }, prev: null };
+    return {
+      currentMonthRevenue: cmRev, currentMonthLabel: cmLabel || "Current month", currentMonthDelta: null,
+      ytdRevenue: ytdRev, ytdLabel: ytdLabel || "YTD", ytdDelta: ytdPrior > 0 ? delta(ytdRev, ytdPrior) : null,
+      occ, adr, revpar: adr && occ ? adr * occ : null, metricLabel: "latest month",
+      occDelta: null, adrDelta: null, revparDelta: null,
+    };
   }, [derived]);
 
   const compare = derived.map((d) => ({ name: d.meta.short, revenue: d.latest?.revenue || 0, color: d.meta.color }));
@@ -632,7 +677,7 @@ function Overview({ model, hasData, onUpload, goto }) {
         </div>
       )}
 
-      <KpiRow d={portfolio} accent={C.slate} />
+      <KpiRow k={portfolioKpi} accent={C.slate} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
         <Panel title="Revenue by property — current month">
@@ -692,7 +737,7 @@ function PropertyPage({ pid, model }) {
         <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>{meta.name}</h1>
           <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{meta.location} · {meta.units} units · latest {d.latest?.label || "—"}</div></div>
       </div>
-      <KpiRow d={d} accent={meta.color} />
+      <KpiRow k={buildKpi(d)} accent={meta.color} />
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
         <Panel title="Year-over-year revenue"><YoyChart d={d} /></Panel>
         <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
