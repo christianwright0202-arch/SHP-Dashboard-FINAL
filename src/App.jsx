@@ -8,7 +8,7 @@ import { loadModel, saveModel } from "./storage";
 import {
   Upload, TrendingUp, TrendingDown, AlertTriangle, Calendar, Sparkles,
   LayoutGrid, Building2, MessageSquare, Send, RefreshCw, Trash2, FileText,
-  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target, Search, MapPin, Activity,
+  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target, Search, MapPin, Activity, Trophy,
 } from "lucide-react";
 
 /* ============================================================
@@ -53,6 +53,22 @@ const MONTH_IDX = Object.fromEntries(MONTHS.map((m, i) => [m.toLowerCase(), i]))
 const OTA_COLORS = { Airbnb: "#e23b3b", Vrbo: "#1668e3", Expedia: "#f5c518", "Booking.com": "#f08a24", Direct: "#1f7a4d", Other: "#94a3b8" };
 
 const MODEL = { properties: {}, events: [], eventsSource: "none", lastUpdated: null };
+
+// World Cup window + AT&T Stadium (Dallas Stadium), Arlington fixtures
+const WC_START = "2026-06-12", WC_END = "2026-07-15";
+const WORLD_CUP_MATCHES = [
+  { date: "2026-06-14", teams: "Netherlands vs Japan", round: "Group", tier: 2 },
+  { date: "2026-06-17", teams: "England vs Croatia", round: "Group", tier: 3 },
+  { date: "2026-06-22", teams: "Argentina vs Austria", round: "Group", tier: 3 },
+  { date: "2026-06-25", teams: "Group Stage (TBD)", round: "Group", tier: 1 },
+  { date: "2026-06-27", teams: "Argentina vs Jordan", round: "Group", tier: 3 },
+  { date: "2026-06-30", teams: "Round of 32", round: "Knockout", tier: 2 },
+  { date: "2026-07-03", teams: "Round of 32", round: "Knockout", tier: 2 },
+  { date: "2026-07-06", teams: "Round of 16", round: "Knockout", tier: 3 },
+  { date: "2026-07-14", teams: "Semifinal", round: "Knockout", tier: 4 },
+];
+const WC_MATCH_BY_DATE = Object.fromEntries(WORLD_CUP_MATCHES.map((m) => [m.date, m]));
+const WC_TIER_COLOR = { 1: "#9aa1ad", 2: "#3b7dd8", 3: "#e07b1f", 4: "#c0392b" };
 
 /* ---------------- parsing helpers ---------------- */
 const num = (v) => {
@@ -103,6 +119,13 @@ function toDate(v) {
   return isNaN(d) ? null : d;
 }
 const mkey = (y, mIdx) => `${y}-${String(mIdx + 1).padStart(2, "0")}`;
+const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const parseUnits = (name) => { const m = String(name || "").match(/--\s*(\d+)\s*units/i); return m ? +m[1] : 1; };
+function wcDateList() {
+  const out = []; const s = new Date(WC_START + "T00:00"); const e = new Date(WC_END + "T00:00");
+  for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) out.push(isoDate(d));
+  return out;
+}
 
 /* find header row: row containing the most KPI keywords */
 const KW = ["listing", "revenue", "occupancy", "occ", "adr", "revpar", "source", "date", "nights", "accommodations", "check in", "check-in", "af"];
@@ -148,6 +171,20 @@ function ingestSheet(rows, ctx) {
   const colWhere = (pred) => headers.findIndex((h) => pred(norm(h)));
   const body = rows.slice(hr + 1);
   const guessProp = () => ctx.propOverride || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename);
+
+  // 0) WORLD CUP daily data (filename flags it; only sheets with a Date column are used)
+  if (/world\s*cup|worldcup/i.test(ctx.filename || "")) {
+    const cList = find("listing"), cDate = find("date"), cOcc = find("occupancy"), cRev = find("rental revenue", "revenue");
+    if (cDate < 0) return out; // skip the totals/overview sheet — recomputed from daily
+    for (const r of body) {
+      const prop = classifyListing(r[cList]) || ctx.propOverride; if (!prop) continue;
+      const d = toDate(r[cDate]); if (!d) continue;
+      const units = parseUnits(r[cList]);
+      const occ = cOcc >= 0 ? (pct(r[cOcc]) || 0) : 0;
+      out.push({ kind: "wc", prop, date: isoDate(d), units, booked: occ * units, revenue: num(r[cRev]) || 0 });
+    }
+    return out;
+  }
 
   // detect format
   const hasSource = find("source") >= 0;
@@ -285,6 +322,12 @@ function applyRecords(model, records) {
     if (!rec.prop || rec.prop === "unknown") continue;
     const p = (next.properties[rec.prop] = next.properties[rec.prop] || { monthly: {}, ota: {}, snapshot: null });
 
+    if (rec.kind === "wc") {
+      const w = (p.wc = p.wc || {});
+      const day = (w[rec.date] = w[rec.date] || { revenue: 0, booked: 0, units: 0 });
+      day.revenue += rec.revenue || 0; day.booked += rec.booked || 0; day.units += rec.units || 0;
+      continue;
+    }
     if (rec.kind === "pace") {
       const pc = (p.pace = p.pace || { bookedNights: 0, bookedNightsSTLY: 0, bookedNightsLY: 0, pickup7: 0, pickup30: 0, bookings: 0, bwSum: 0, bwN: 0 });
       pc.bookedNights += rec.bookedNights || 0; pc.bookedNightsSTLY += rec.bookedNightsSTLY || 0; pc.bookedNightsLY += rec.bookedNightsLY || 0;
@@ -411,6 +454,24 @@ function buildKpi(d) {
     adrDelta: delta(d.latest?.adr, d.prev?.adr),
     revparDelta: delta(d.latest?.revpar, d.prev?.revpar),
   };
+}
+
+// Aggregate World Cup daily data across a scope of properties
+function deriveWorldCup(model, propIds) {
+  const ids = propIds && propIds.length ? propIds : PROPERTIES.map((p) => p.id);
+  const dates = wcDateList();
+  let tRev = 0, tBooked = 0, tUnitNights = 0;
+  const byDate = dates.map((date) => {
+    let rev = 0, booked = 0, units = 0;
+    ids.forEach((pid) => { const day = model.properties[pid]?.wc?.[date]; if (day) { rev += day.revenue; booked += day.booked; units += day.units; } });
+    tRev += rev; tBooked += booked; tUnitNights += units;
+    return { date, revenue: rev, booked, units, occ: units ? booked / units : null, adr: booked ? rev / booked : null, revpar: units ? rev / units : null, match: WC_MATCH_BY_DATE[date] || null };
+  });
+  const has = byDate.some((d) => d.units > 0);
+  const totals = { revenue: tRev, occ: tUnitNights ? tBooked / tUnitNights : null, adr: tBooked ? tRev / tBooked : null, revpar: tUnitNights ? tRev / tUnitNights : null };
+  let mdBooked = 0, mdUnits = 0, nmBooked = 0, nmUnits = 0;
+  byDate.forEach((d) => { if (d.match) { mdBooked += d.booked; mdUnits += d.units; } else { nmBooked += d.booked; nmUnits += d.units; } });
+  return { byDate, totals, has, matchOcc: mdUnits ? mdBooked / mdUnits : null, nonMatchOcc: nmUnits ? nmBooked / nmUnits : null };
 }
 
 function fmtMoney(v, d = 0) { if (v == null) return "—"; return "$" + Number(v).toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d }); }
@@ -540,6 +601,7 @@ function Dashboard() {
             <div style={{ fontFamily: "Georgia, serif", fontSize: 23, fontWeight: 700, lineHeight: 1.1, marginTop: 4 }}>SHP Reporting<br />Dashboard</div>
           </div>
           <NavItem icon={<LayoutGrid size={17} />} label="Overview" active={page === "overview"} onClick={() => setPage("overview")} color="#8ea0b8" />
+          <NavItem icon={<Trophy size={17} />} label="World Cup" active={page === "worldcup"} onClick={() => setPage("worldcup")} color="#f0b21b" />
           {REGIONS.map((rg) => (
             <div key={rg.id}>
               <button className="navbtn ui" onClick={() => setPage("region:" + rg.id)}
@@ -603,6 +665,7 @@ function Dashboard() {
           <div style={{ padding: "26px 28px 60px" }}>
             {!loaded ? <div className="ui" style={{ color: C.muted }}>Loading…</div>
               : page === "overview" ? <Overview model={model} hasData={hasData} onUpload={() => fileRef.current?.click()} goto={setPage} />
+                : page === "worldcup" ? <WorldCupPage model={model} onUpload={() => fileRef.current?.click()} />
                 : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={model} goto={setPage} />
                 : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
                   : page === "ask" ? <AskPage model={model} />
@@ -1207,6 +1270,180 @@ function AuditCell({ value, fromFile }) {
   );
 }
 
+/* ---------------- WORLD CUP ---------------- */
+const WC_SCOPES = [{ id: "all", label: "Portfolio" }, { id: "fortworth", label: "Fort Worth" }, { id: "arlington", label: "Arlington" }];
+function wcHeat(occ) {
+  if (occ == null) return "#ffffff";
+  const t = Math.max(0, Math.min(1, occ));
+  const r = Math.round(243 + (23 - 243) * t), g = Math.round(246 + (58 - 246) * t), b = Math.round(250 + (104 - 250) * t);
+  return `rgb(${r},${g},${b})`;
+}
+function scopeBtn(active, color) {
+  return { background: active ? color : "#fff", color: active ? "#fff" : C.sub, border: `1px solid ${active ? color : C.border}`, borderRadius: 8, padding: "7px 13px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" };
+}
+function WorldCupPage({ model, onUpload }) {
+  const [scope, setScope] = useState("all");
+  const propIds = useMemo(() => {
+    if (scope === "all") return PROPERTIES.map((p) => p.id);
+    if (scope === "fortworth" || scope === "arlington") return PROPS_IN(scope).map((p) => p.id);
+    return [scope];
+  }, [scope]);
+  const wc = useMemo(() => deriveWorldCup(model, propIds), [model, propIds.join()]);
+  const accent = PROP_BY_ID[scope] ? PROP_BY_ID[scope].color : "#f0b21b";
+
+  const cards = [
+    { label: "World Cup Revenue", icon: <DollarSign size={15} />, val: fmtMoney(wc.totals.revenue) },
+    { label: "World Cup Occupancy %", icon: <Percent size={15} />, val: fmtPct(wc.totals.occ) },
+    { label: "World Cup ADR", icon: <BedDouble size={15} />, val: fmtMoney(wc.totals.adr) },
+    { label: "World Cup RevPAR", icon: <Gauge size={15} />, val: fmtMoney(wc.totals.revpar) },
+  ];
+
+  const weeks = useMemo(() => {
+    const first = new Date(WC_START + "T00:00");
+    const lead = first.getDay();
+    const cells = [];
+    for (let i = 0; i < lead; i++) cells.push(null);
+    wc.byDate.forEach((d) => cells.push(d));
+    while (cells.length % 7 !== 0) cells.push(null);
+    const wk = []; for (let i = 0; i < cells.length; i += 7) wk.push(cells.slice(i, i + 7));
+    return wk;
+  }, [wc]);
+
+  const flags = wc.byDate.filter((d) => d.match && d.occ != null && d.occ < 0.7 && d.units > 0).sort((a, b) => (a.occ || 0) - (b.occ || 0));
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
+        <Trophy size={26} style={{ color: "#f0b21b" }} />
+        <h1 style={{ fontFamily: "Georgia, serif", fontSize: 28, fontWeight: 700, margin: 0 }}>World Cup 2026</h1>
+      </div>
+      <div className="ui" style={{ color: C.muted, fontSize: 13.5, marginBottom: 16 }}>June 12 – July 15 · AT&T Stadium (Arlington) hosts 9 matches incl. the July 14 semifinal</div>
+
+      <div className="ui" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18, alignItems: "center" }}>
+        {WC_SCOPES.map((s) => <button key={s.id} onClick={() => setScope(s.id)} style={scopeBtn(scope === s.id, "#f0b21b")}>{s.label}</button>)}
+        <span style={{ width: 1, height: 22, background: C.border, margin: "0 4px" }} />
+        {PROPERTIES.map((p) => <button key={p.id} onClick={() => setScope(p.id)} style={scopeBtn(scope === p.id, p.color)}>{p.short}</button>)}
+      </div>
+
+      {!wc.has && (
+        <div className="ui" onClick={onUpload} style={{ cursor: "pointer", border: `2px dashed ${C.borderStrong}`, borderRadius: 16, padding: "40px 24px", textAlign: "center", background: "#fafbfc", marginBottom: 20 }}>
+          <Upload size={24} style={{ color: C.muted }} />
+          <div style={{ fontWeight: 600, marginTop: 8, color: C.ink }}>Upload your World Cup KPI file</div>
+          <div style={{ color: C.muted, fontSize: 13, marginTop: 3 }}>A file named with "World Cup" containing a per-date sheet — it auto-loads here.</div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 14 }}>
+        {cards.map((c) => (
+          <div key={c.label} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", borderTop: `3px solid ${accent}` }}>
+            <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, color: C.muted, fontSize: 11, fontWeight: 700, letterSpacing: .3, textTransform: "uppercase" }}>
+              <span style={{ color: accent }}>{c.icon}</span>{c.label}
+            </div>
+            <div style={{ fontFamily: "Georgia, serif", fontSize: 27, fontWeight: 700, marginTop: 7, color: C.ink }}>{c.val}</div>
+          </div>
+        ))}
+      </div>
+
+      {wc.matchOcc != null && wc.nonMatchOcc != null && (
+        <div className="ui" style={{ marginTop: 12, fontSize: 13, color: C.sub, background: "#fffaf0", border: "1px solid #f3e2bf", borderRadius: 10, padding: "9px 14px" }}>
+          Match-day occupancy <b>{fmtPct(wc.matchOcc)}</b> vs. non-match-day <b>{fmtPct(wc.nonMatchOcc)}</b>
+          {wc.nonMatchOcc > 0 && <> — a {((wc.matchOcc / wc.nonMatchOcc - 1) * 100).toFixed(0)}% lift on game days.</>}
+        </div>
+      )}
+
+      <Panel title="Demand calendar — occupancy heat & match days" style={{ marginTop: 16 }}>
+        <div className="ui" style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 5 }}>
+          {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
+            <div key={d} style={{ fontSize: 10.5, fontWeight: 700, color: C.muted, textAlign: "center", textTransform: "uppercase", letterSpacing: .5, paddingBottom: 2 }}>{d}</div>
+          ))}
+          {weeks.flat().map((cell, i) => {
+            if (!cell) return <div key={i} />;
+            const d = new Date(cell.date + "T00:00");
+            const dark = (cell.occ || 0) > 0.55;
+            return (
+              <div key={i} title={`${cell.date}: ${fmtPct(cell.occ)} occ, ${fmtMoney(cell.revenue)}`}
+                style={{ background: wcHeat(cell.occ), border: `1px solid ${cell.match ? WC_TIER_COLOR[cell.match.tier] : C.border}`, borderRadius: 9, padding: "6px 7px", minHeight: 80, position: "relative" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#fff" : C.ink }}>{d.getDate()}</div>
+                {cell.match && (
+                  <div style={{ fontSize: 8.5, fontWeight: 700, color: "#fff", background: WC_TIER_COLOR[cell.match.tier], borderRadius: 5, padding: "1px 4px", marginTop: 2, lineHeight: 1.25 }}>
+                    {cell.match.tier === 4 ? "★ " : "⚽ "}{cell.match.teams}
+                  </div>
+                )}
+                <div style={{ position: "absolute", bottom: 5, left: 7, right: 7 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#fff" : C.ink }}>{cell.occ != null ? (cell.occ * 100).toFixed(0) + "%" : "—"}</div>
+                  <div style={{ fontSize: 9.5, color: dark ? "rgba(255,255,255,.85)" : C.muted }}>{cell.revenue ? fmtMoney(cell.revenue) : ""}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="ui" style={{ display: "flex", gap: 14, marginTop: 12, fontSize: 11, color: C.muted, flexWrap: "wrap" }}>
+          <span>Shade = occupancy</span>
+          {[[1, "Group (TBD)"], [3, "Marquee group"], [2, "Knockout"], [4, "Semifinal"]].map(([t, l]) => (
+            <span key={t} style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: WC_TIER_COLOR[t] }} />{l}</span>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel title="Daily revenue across the window" style={{ marginTop: 16 }}>
+        {wc.has ? (
+          <ResponsiveContainer width="100%" height={230}>
+            <BarChart data={wc.byDate.map((d) => ({ label: d.date.slice(5), revenue: d.revenue, m: !!d.match }))} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 9, fill: C.muted }} axisLine={false} tickLine={false} interval={2} />
+              <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
+              <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+              <Bar dataKey="revenue" radius={[3, 3, 0, 0]}>
+                {wc.byDate.map((d, i) => <Cell key={i} fill={d.match ? WC_TIER_COLOR[d.match.tier] : "#c9d0da"} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        ) : <Empty text="Upload World Cup data to see daily revenue." />}
+      </Panel>
+
+      <Panel title="Match schedule — occupancy & revenue per game date" style={{ marginTop: 16 }}>
+        <div style={{ overflowX: "auto" }}>
+          <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: .4 }}>
+                {["Date", "Match", "Round", "Occupancy", "Revenue", "ADR"].map((h) => <th key={h} style={{ padding: "8px 10px", borderBottom: `2px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {WORLD_CUP_MATCHES.map((m) => {
+                const day = wc.byDate.find((d) => d.date === m.date);
+                return (
+                  <tr key={m.date} style={{ borderBottom: `1px solid ${C.track}` }}>
+                    <td style={{ padding: "8px 10px", fontWeight: 600, whiteSpace: "nowrap" }}>{new Date(m.date + "T00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</td>
+                    <td style={{ padding: "8px 10px" }}><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 8, background: WC_TIER_COLOR[m.tier], marginRight: 7 }} />{m.teams}</td>
+                    <td style={{ padding: "8px 10px", color: C.muted }}>{m.round}</td>
+                    <td style={{ padding: "8px 10px", fontWeight: 600 }}>{fmtPct(day?.occ)}</td>
+                    <td style={{ padding: "8px 10px" }}>{fmtMoney(day?.revenue)}</td>
+                    <td style={{ padding: "8px 10px" }}>{fmtMoney(day?.adr)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      {flags.length > 0 && (
+        <Panel title="Pricing opportunities — match days still under 70% booked" style={{ marginTop: 16 }}>
+          <div style={{ display: "grid", gap: 8 }}>
+            {flags.map((d) => (
+              <div key={d.date} className="ui" style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 10, background: "#fffaf0", border: "1px solid #f3e2bf" }}>
+                <Target size={16} style={{ color: "#b7791f", flexShrink: 0 }} />
+                <span style={{ fontWeight: 700, fontSize: 13 }}>{d.match.teams}</span>
+                <span style={{ fontSize: 13, color: C.sub }}>· {new Date(d.date + "T00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} — only {fmtPct(d.occ)} booked at {fmtMoney(d.adr)} ADR. Demand is here; push rate or fill.</span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+    </div>
+  );
+}
 
 export default function App() {
   const required = import.meta.env.VITE_APP_PASSWORD || "";
