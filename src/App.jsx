@@ -837,7 +837,7 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
     };
   }, [derived]);
 
-  const compare = derived.map((d) => ({ name: d.meta.short, revenue: d.latest?.revenue || 0, color: d.meta.color }));
+  const compare = derived.map((d) => ({ name: d.meta.short, revenue: d.currentMonth?.revenue || 0, color: d.meta.color }));
   const portfolioOta = useMemo(() => {
     const totals = {};
     derived.forEach((d) => { (d.ota || []).forEach((o) => { totals[o.name] = (totals[o.name] || 0) + o.value; }); });
