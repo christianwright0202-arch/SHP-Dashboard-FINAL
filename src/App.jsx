@@ -250,8 +250,10 @@ function deriveProperty(pid, model) {
     return { key: k, year: y, mIdx: m - 1, label: `${MONTHS[m - 1]} '${String(y).slice(2)}`, monthName: MONTHS[m - 1], revenue: d.revenue, occ, adr, revpar, nights: d.nights };
   });
   const snap = p.snapshot && p.snapshot.revenue ? p.snapshot : null;
-  let latest = series[series.length - 1] || null;
-  let prev = series[series.length - 2] || null;
+  // Use the most recent month that actually has revenue (skip empty future months like unbooked Oct/Nov/Dec)
+  const withData = series.filter((s) => (s.revenue || 0) > 0 || (s.nights || 0) > 0);
+  let latest = withData[withData.length - 1] || null;
+  let prev = withData[withData.length - 2] || null;
   // If we have a snapshot but no monthly series, use the snapshot as latest
   // If we have monthly series, prefer it — but also try to fill in occ/adr/revpar from snapshot if missing
   if (!latest && snap) {
