@@ -8,7 +8,7 @@ import { loadModel, saveModel } from "./storage";
 import {
   Upload, TrendingUp, TrendingDown, AlertTriangle, Calendar, Sparkles,
   LayoutGrid, Building2, MessageSquare, Send, RefreshCw, Trash2, FileText,
-  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target, Search,
+  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target, Search, MapPin, Activity,
 } from "lucide-react";
 
 /* ============================================================
@@ -30,13 +30,22 @@ const C = {
   track: "#f3f4f6",
 };
 
+const REGIONS = [
+  { id: "fortworth", name: "Fort Worth" },
+  { id: "arlington", name: "Arlington" },
+];
 const PROPERTIES = [
+  // Fort Worth
   { id: "soma", name: "Hotel SOMA", short: "SOMA", color: "#e07b1f", location: "Fort Worth", units: 31, market: "fortworth", match: /soma/i },
-  { id: "rambler", name: "The Rambler Inn", short: "Rambler", color: "#cf3a3a", location: "Fort Worth", units: 22, market: "fortworth", match: /rambler/i },
-  { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 18, market: "arlington", match: /(ballpark|rogers|ryan)/i },
   { id: "kress", name: "Kress", short: "Kress", color: "#1f7a4d", location: "Fort Worth", units: 7, market: "fortworth", match: /kress/i },
   { id: "harley", name: "Harley", short: "Harley", color: "#6a3da8", location: "Fort Worth", units: 3, market: "fortworth", match: /harley/i },
+  // Arlington
+  { id: "rambler", name: "The Rambler Inn", short: "Rambler", color: "#cf3a3a", location: "Arlington", units: 22, market: "arlington", match: /rambler/i },
+  { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 18, market: "arlington", match: /(ballpark|ryan)/i },
+  { id: "woodbrook", name: "Woodbrook", short: "Woodbrook", color: "#138a8a", location: "Arlington", units: 1, market: "arlington", match: /woodbrook/i },
+  { id: "rogers", name: "Rogers", short: "Rogers", color: "#b5651d", location: "Arlington", units: 2, market: "arlington", match: /rogers/i },
 ];
+const PROPS_IN = (region) => PROPERTIES.filter((p) => p.market === region);
 const PROP_BY_ID = Object.fromEntries(PROPERTIES.map((p) => [p.id, p]));
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -117,6 +126,18 @@ function colFinder(headers) {
   };
 }
 
+/* find a "Month YYYY" label near the header row (used by the monthly KPI tracker) */
+const MONTH_YEAR_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{4})\b/i;
+function findMonthYearNear(rows, hr) {
+  for (let i = Math.max(0, hr - 3); i <= hr; i++) {
+    for (const cell of (rows[i] || [])) {
+      const m = String(cell).match(MONTH_YEAR_RE);
+      if (m) return { mIdx: MONTH_IDX[m[1].toLowerCase().slice(0, 3)], year: +m[2] };
+    }
+  }
+  return null;
+}
+
 /* Ingest one sheet -> array of normalized records */
 function ingestSheet(rows, ctx) {
   const out = [];
@@ -124,31 +145,34 @@ function ingestSheet(rows, ctx) {
   if (hr < 0) return out;
   const headers = rows[hr].map((x) => String(x ?? ""));
   const find = colFinder(headers);
+  const colWhere = (pred) => headers.findIndex((h) => pred(norm(h)));
   const body = rows.slice(hr + 1);
+  const guessProp = () => ctx.propOverride || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename);
 
   // detect format
   const hasSource = find("source") >= 0;
   const hasCheckin = find("check in", "check-in", "checkin") >= 0;
   const hasListing = find("listing") >= 0;
+  const hasStayDate = find("stay date") >= 0;
+  const hasResSource = find("reservation source") >= 0;
+  const hasBookedNights = colWhere((h) => h.includes("booked nights")) >= 0;
+  const hasPickup = colWhere((h) => h.includes("pickup")) >= 0 || colWhere((h) => h.includes("booking window")) >= 0;
   const dateCol = find("date");
-  // monthly RevPAR style: a "date" col with month names + year-suffixed revenue cols
   const yearRevCols = headers.map((hd, i) => {
-    const m = String(hd).match(/revenue\D*(\d{4})/i) || String(hd).match(/rental revenue\D*(\d{4})/i);
+    const m = String(hd).match(/revenue\D*(\d{4})/i);
     return m ? { i, year: +m[1] } : null;
   }).filter(Boolean);
   const yearRevparCols = headers.map((hd, i) => { const m = String(hd).match(/revpar\D*(\d{4})/i); return m ? { i, year: +m[1] } : null; }).filter(Boolean);
   const yearNightsCols = headers.map((hd, i) => { const m = String(hd).match(/(accommodations booked|nights)\D*(\d{4})/i); return m ? { i, year: +m[2] } : null; }).filter(Boolean);
 
+  // 1) RESERVATION-LEVEL (one row per booking)
   if (hasSource && hasCheckin) {
-    // RESERVATION-LEVEL
     const cSrc = find("source"), cIn = find("check in", "check-in", "checkin"), cList = find("listing");
     const cNights = find("nights"), cAF = find("af", "accommodation fare", "fare", "revenue"), cADR = find("adr");
     for (const r of body) {
-      const list = r[cList]; const prop = classifyListing(list) || ctx.propOverride;
-      if (!prop) continue;
+      const prop = classifyListing(r[cList]) || ctx.propOverride; if (!prop) continue;
       const d = toDate(r[cIn]); if (!d) continue;
-      let rev = num(r[cAF]);
-      const nights = num(r[cNights]) || 0;
+      let rev = num(r[cAF]); const nights = num(r[cNights]) || 0;
       if (rev == null && cADR >= 0) rev = (num(r[cADR]) || 0) * nights;
       if (rev == null) continue;
       out.push({ kind: "res", prop, month: mkey(d.getFullYear(), d.getMonth()), year: d.getFullYear(), mIdx: d.getMonth(), revenue: rev, nights, source: sourceLabel(r[cSrc]) });
@@ -156,12 +180,54 @@ function ingestSheet(rows, ctx) {
     return out;
   }
 
-  if (yearRevCols.length && dateCol >= 0) {
-    // MONTHLY TIME-SERIES (RevPAR report)
-    const prop = ctx.propOverride || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename);
+  // 2) CHANNEL PRODUCTION (Stay Date + Reservation Source + Total Room Revenue) -> channel mix + monthly revenue
+  if (hasResSource && hasStayDate) {
+    const cStay = find("stay date");
+    const cCat = colWhere((h) => h.includes("source category"));
+    const cDetail = colWhere((h) => h.includes("reservation source") && !h.includes("category"));
+    const cRooms = find("rooms sold"), cRev = find("total room revenue", "room revenue", "revenue");
+    const prop = guessProp(); const yr = new Date().getFullYear();
     for (const r of body) {
-      const mlabel = norm(r[dateCol]); const mIdx = MONTH_IDX[mlabel.slice(0, 3)];
-      if (mIdx == null) continue;
+      const mIdx = MONTH_IDX[norm(r[cStay]).slice(0, 3)]; if (mIdx == null) continue;
+      const rev = num(r[cRev]); if (rev == null || rev <= 0) continue;
+      const cat = cCat >= 0 ? norm(r[cCat]) : "";
+      const src = cat.includes("direct") ? "Direct" : sourceLabel(cDetail >= 0 ? r[cDetail] : r[cCat]);
+      out.push({ kind: "res", prop: prop || "unknown", month: mkey(yr, mIdx), year: yr, mIdx, revenue: rev, nights: num(r[cRooms]) || 0, source: src });
+    }
+    return out;
+  }
+
+  // 3) PACE / PICKUP report (Listing + Booked Nights + Pickup / Booking Window)
+  if (hasListing && (hasBookedNights || hasPickup)) {
+    const cList = find("listing");
+    const cBN = colWhere((h) => h === "booked nights");
+    const cBNs = colWhere((h) => h === "booked nights stly");
+    const cBNl = colWhere((h) => h === "booked nights ly");
+    const cP7 = colWhere((h) => h.includes("pickup") && h.includes("7 day") && !h.includes("stly"));
+    const cP30 = colWhere((h) => h.includes("pickup") && h.includes("30 day") && !h.includes("stly"));
+    const cBk = colWhere((h) => h === "number of bookings");
+    const cBW = colWhere((h) => h.includes("median booking window"));
+    for (const r of body) {
+      const prop = classifyListing(r[cList]) || ctx.propOverride; if (!prop) continue;
+      out.push({
+        kind: "pace", prop,
+        bookedNights: cBN >= 0 ? num(r[cBN]) || 0 : 0,
+        bookedNightsSTLY: cBNs >= 0 ? num(r[cBNs]) || 0 : 0,
+        bookedNightsLY: cBNl >= 0 ? num(r[cBNl]) || 0 : 0,
+        pickup7: cP7 >= 0 ? num(r[cP7]) || 0 : 0,
+        pickup30: cP30 >= 0 ? num(r[cP30]) || 0 : 0,
+        bookings: cBk >= 0 ? num(r[cBk]) || 0 : 0,
+        bookingWindow: cBW >= 0 ? num(r[cBW]) : null,
+      });
+    }
+    return out;
+  }
+
+  // 4) MONTHLY TIME-SERIES (RevPAR report: Date + Revenue YYYY columns)
+  if (yearRevCols.length && dateCol >= 0) {
+    const prop = guessProp();
+    for (const r of body) {
+      const mIdx = MONTH_IDX[norm(r[dateCol]).slice(0, 3)]; if (mIdx == null) continue;
       for (const yc of yearRevCols) {
         const rev = num(r[yc.i]); if (rev == null) continue;
         const revparC = yearRevparCols.find((x) => x.year === yc.year);
@@ -176,24 +242,36 @@ function ingestSheet(rows, ctx) {
     return out;
   }
 
+  // 5) LISTING-LEVEL KPIs — supports MULTIPLE stacked month sections (Jan, Feb, ... each its own block)
   if (hasListing) {
-    // LISTING-LEVEL KPI SNAPSHOT (annual or single-period)
     const cList = find("listing");
     const cOcc = find("occupancy", "occ %", "occ");
     const cRev = find("rental revenue", "revenue");
     const cADR = find("adr"); const cRevpar = find("revpar");
-    const cRevLY = headers.findIndex((hd) => /revenue.*(ly|2025|2024)/i.test(hd) || /\(2025\)/.test(hd));
-    const thisYear = ctx.asYear || new Date().getFullYear();
-    for (const r of body) {
-      const list = r[cList]; if (!list || norm(list) === "total") continue;
+    const cRevLY = colWhere((h) => h.includes("revenue") && h.includes("ly"));
+    const bareMonth = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?$/;
+    let curYear = ctx.asYear || new Date().getFullYear();
+    let curMonth = null;
+    for (const row of rows) {
+      // update current month/year if this row carries a month label (with or without a year)
+      for (const cell of row) {
+        const s = String(cell); const my = s.match(MONTH_YEAR_RE);
+        if (my) { curMonth = MONTH_IDX[my[1].toLowerCase().slice(0, 3)]; curYear = +my[2]; break; }
+        const mo = norm(s).match(bareMonth);
+        if (mo) { curMonth = MONTH_IDX[mo[1].slice(0, 3)]; break; }
+      }
+      if (row.some((c) => norm(c).includes("listing name"))) continue; // header row
+      const list = row[cList]; if (!list || norm(list) === "total" || norm(list) === "listing name") continue;
       const prop = classifyListing(list) || ctx.propOverride; if (!prop) continue;
-      const rev = cRev >= 0 ? num(r[cRev]) : null; if (rev == null) continue;
-      out.push({
-        kind: "snapshot", prop, year: thisYear, month: ctx.snapMonth || `${thisYear}-00`,
-        revenue: rev, occ: cOcc >= 0 ? pct(r[cOcc]) : null,
-        adr: cADR >= 0 ? num(r[cADR]) : null, revpar: cRevpar >= 0 ? num(r[cRevpar]) : null,
-        revenueLY: cRevLY >= 0 ? num(r[cRevLY]) : null,
-      });
+      const rev = cRev >= 0 ? num(row[cRev]) : null; if (rev == null) continue;
+      const occ = cOcc >= 0 ? pct(row[cOcc]) : null;
+      const revLY = cRevLY >= 0 ? num(row[cRevLY]) : null;
+      if (curMonth != null) {
+        const nights = occ != null ? occ * daysInMonth(curYear, curMonth) : null;
+        out.push({ kind: "listingmonth", prop, year: curYear, mIdx: curMonth, month: mkey(curYear, curMonth), monthLY: mkey(curYear - 1, curMonth), revenue: rev, nights, revenueLY: revLY });
+      } else {
+        out.push({ kind: "snapshot", prop, year: curYear, month: ctx.snapMonth || `${curYear}-00`, revenue: rev, occ, adr: cADR >= 0 ? num(row[cADR]) : null, revpar: cRevpar >= 0 ? num(row[cRevpar]) : null, revenueLY: revLY });
+      }
     }
     return out;
   }
@@ -206,6 +284,25 @@ function applyRecords(model, records) {
   for (const rec of records) {
     if (!rec.prop || rec.prop === "unknown") continue;
     const p = (next.properties[rec.prop] = next.properties[rec.prop] || { monthly: {}, ota: {}, snapshot: null });
+
+    if (rec.kind === "pace") {
+      const pc = (p.pace = p.pace || { bookedNights: 0, bookedNightsSTLY: 0, bookedNightsLY: 0, pickup7: 0, pickup30: 0, bookings: 0, bwSum: 0, bwN: 0 });
+      pc.bookedNights += rec.bookedNights || 0; pc.bookedNightsSTLY += rec.bookedNightsSTLY || 0; pc.bookedNightsLY += rec.bookedNightsLY || 0;
+      pc.pickup7 += rec.pickup7 || 0; pc.pickup30 += rec.pickup30 || 0; pc.bookings += rec.bookings || 0;
+      if (rec.bookingWindow != null) { pc.bwSum += rec.bookingWindow; pc.bwN++; }
+      continue;
+    }
+    if (rec.kind === "listingmonth") {
+      const cur = (p.monthly[rec.month] = p.monthly[rec.month] || { revenue: 0, nights: 0 });
+      cur.revenue += rec.revenue || 0;
+      if (rec.nights != null) cur.nights = (cur.nights || 0) + rec.nights;
+      if (rec.revenueLY != null) {
+        const ly = (p.monthly[rec.monthLY] = p.monthly[rec.monthLY] || { revenue: 0, nights: 0 });
+        ly.revenue += rec.revenueLY || 0;
+      }
+      continue;
+    }
+
     const isAnnualSnap = rec.kind === "snapshot" && (!rec.month || rec.month.endsWith("-00"));
     if (isAnnualSnap) {
       const s = (p.snapshot = p.snapshot || { year: rec.year, revenue: 0, revenueLY: 0, occSum: 0, occN: 0, adrSum: 0, adrN: 0, revparSum: 0, revparN: 0 });
@@ -296,7 +393,7 @@ function deriveProperty(pid, model) {
     has: !!cmRow,
   };
 
-  return { pid, meta, series, latest, prev, snap, yoy, years, curY, priorY, ota, raw: p, currentMonth, ytd, ytdPrior, ytdYear: thisYear };
+  return { pid, meta, series, latest, prev, snap, yoy, years, curY, priorY, ota, raw: p, currentMonth, ytd, ytdPrior, ytdYear: thisYear, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
 }
 
 // Build the normalized 5-card KPI object for a single property
@@ -334,14 +431,18 @@ async function callClaude({ messages, system, tools, max_tokens = 1000 }) {
   const data = await res.json();
   return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
 }
-function snapshotForAI(model) {
+function snapshotForAI(model, propIds) {
   const lines = [];
-  for (const pid of Object.keys(model.properties)) {
+  const ids = propIds && propIds.length ? propIds : Object.keys(model.properties);
+  for (const pid of ids) {
+    if (!model.properties[pid]) continue;
     const d = deriveProperty(pid, model); if (!d || !d.latest) continue;
     const L = d.latest;
     lines.push(`${d.meta.name} (${d.meta.location}, ${d.meta.units} units) — latest ${L.label}: Revenue ${fmtMoney(L.revenue)}, Occ ${fmtPct(L.occ)}, ADR ${fmtMoney(L.adr)}, RevPAR ${fmtMoney(L.revpar)}.` +
+      ` Current month (${d.currentMonth.label}) rev ${fmtMoney(d.currentMonth.revenue)}; ${d.ytdYear} YTD ${fmtMoney(d.ytd)}.` +
       (d.priorY != null ? ` Prior-year ${L.monthName} rev: ${fmtMoney(d.yoy.find((y) => y.month === L.monthName)?.[d.priorY])}.` : "") +
-      (d.ota.length ? ` OTA mix: ${d.ota.map((o) => o.name + " " + fmtMoney(o.value)).join(", ")}.` : ""));
+      (d.pace ? ` Pace: ${d.pace.bookedNights} booked nights vs ${d.pace.bookedNightsSTLY} same-time-last-year; pickup 7d ${d.pace.pickup7}, 30d ${d.pace.pickup30}.` : "") +
+      (d.ota.length ? ` Channel mix: ${d.ota.map((o) => o.name + " " + fmtMoney(o.value)).join(", ")}.` : ""));
   }
   return lines.join("\n") || "No data loaded yet.";
 }
@@ -439,9 +540,18 @@ function Dashboard() {
             <div style={{ fontFamily: "Georgia, serif", fontSize: 23, fontWeight: 700, lineHeight: 1.1, marginTop: 4 }}>SHP Reporting<br />Dashboard</div>
           </div>
           <NavItem icon={<LayoutGrid size={17} />} label="Overview" active={page === "overview"} onClick={() => setPage("overview")} color="#8ea0b8" />
-          <div style={{ fontSize: 10, letterSpacing: 2, color: "#6c7d96", margin: "16px 8px 6px", fontWeight: 700 }}>PROPERTIES</div>
-          {PROPERTIES.map((p) => (
-            <NavItem key={p.id} icon={<Building2 size={17} />} label={p.name} active={page === p.id} onClick={() => setPage(p.id)} color={p.color} dot />
+          {REGIONS.map((rg) => (
+            <div key={rg.id}>
+              <button className="navbtn ui" onClick={() => setPage("region:" + rg.id)}
+                style={{ width: "100%", textAlign: "left", background: page === "region:" + rg.id ? "rgba(255,255,255,.10)" : "transparent", color: "#dfe6ef", border: "none", borderRadius: 7, padding: "9px 11px", fontSize: 12, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", cursor: "pointer", display: "flex", alignItems: "center", gap: 8, marginTop: 14, marginBottom: 2 }}>
+                <MapPin size={15} style={{ color: "#8ea0b8" }} /> {rg.name}
+              </button>
+              {PROPS_IN(rg.id).map((p) => (
+                <div key={p.id} style={{ paddingLeft: 12 }}>
+                  <NavItem icon={<Building2 size={16} />} label={p.name} active={page === p.id} onClick={() => setPage(p.id)} color={p.color} dot />
+                </div>
+              ))}
+            </div>
           ))}
           <div style={{ fontSize: 10, letterSpacing: 2, color: "#6c7d96", margin: "16px 8px 6px", fontWeight: 700 }}>INTELLIGENCE</div>
           <NavItem icon={<Calendar size={17} />} label="Events" active={page === "events"} onClick={() => setPage("events")} color="#8ea0b8" />
@@ -493,6 +603,7 @@ function Dashboard() {
           <div style={{ padding: "26px 28px 60px" }}>
             {!loaded ? <div className="ui" style={{ color: C.muted }}>Loading…</div>
               : page === "overview" ? <Overview model={model} hasData={hasData} onUpload={() => fileRef.current?.click()} goto={setPage} />
+                : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={model} goto={setPage} />
                 : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
                   : page === "ask" ? <AskPage model={model} />
                     : page === "audit" ? <AuditPage model={model} />
@@ -626,23 +737,29 @@ function TrendChart({ series, dataKey, color, fmt }) {
 }
 function Empty({ text }) { return <div className="ui" style={{ color: C.faint, fontSize: 13, padding: "30px 6px", textAlign: "center" }}>{text}</div>; }
 
-/* ---------------- OVERVIEW ---------------- */
+/* ---------------- OVERVIEW + REGION (shared PortfolioView) ---------------- */
 function Overview({ model, hasData, onUpload, goto }) {
-  const derived = useMemo(() => PROPERTIES.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model]);
-  // portfolio rollup -> 5-card KPI object
-  const portfolioKpi = useMemo(() => {
-    let cmRev = 0, ytdRev = 0, ytdPrior = 0;
-    let nights = 0, avail = 0, adrW = 0, adrN = 0, occSum = 0, occN = 0;
-    let cmLabel = "", ytdLabel = "";
+  return <PortfolioView model={model} props={PROPERTIES} title="Portfolio Overview" sub="Everything under SHP management, across Fort Worth & Arlington" accent={C.slate} goto={goto} hasData={hasData} onUpload={onUpload} channelTitle="Channel mix — entire portfolio" />;
+}
+function RegionPage({ region, model, goto }) {
+  const rg = REGIONS.find((r) => r.id === region);
+  const props = PROPS_IN(region);
+  return <PortfolioView model={model} props={props} title={rg ? rg.name : "Region"} sub={`${props.length} properties in ${rg ? rg.name : region}`} accent={C.slate} goto={goto} hasData channelTitle={`Channel mix — ${rg ? rg.name : region}`} regionMode />;
+}
+
+function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUpload, channelTitle, regionMode }) {
+  const propIds = props.map((p) => p.id);
+  const derived = useMemo(() => props.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model, propIds.join()]);
+
+  const kpi = useMemo(() => {
+    let cmRev = 0, ytdRev = 0, ytdPrior = 0, nights = 0, avail = 0, adrW = 0, adrN = 0, occSum = 0, occN = 0, cmLabel = "", ytdLabel = "";
     derived.forEach((d) => {
-      cmRev += d.currentMonth.revenue || 0;
-      ytdRev += d.ytd || 0;
-      ytdPrior += d.ytdPrior || 0;
+      cmRev += d.currentMonth.revenue || 0; ytdRev += d.ytd || 0; ytdPrior += d.ytdPrior || 0;
       cmLabel = d.currentMonth.label; ytdLabel = `${d.ytdYear} YTD`;
       const L = d.latest;
       if (L) {
         nights += L.nights || 0;
-        if (L.mIdx != null) { const days = daysInMonth(L.year, L.mIdx); avail += d.meta.units * days; }
+        if (L.mIdx != null) { avail += d.meta.units * daysInMonth(L.year, L.mIdx); }
         if (L.adr != null) { adrW += L.adr * (L.nights || 1); adrN += (L.nights || 1); }
         if (L.occ != null) { occSum += L.occ; occN++; }
       }
@@ -658,8 +775,6 @@ function Overview({ model, hasData, onUpload, goto }) {
   }, [derived]);
 
   const compare = derived.map((d) => ({ name: d.meta.short, revenue: d.latest?.revenue || 0, color: d.meta.color }));
-
-  // Portfolio-wide OTA channel mix (sum every property's channel revenue)
   const portfolioOta = useMemo(() => {
     const totals = {};
     derived.forEach((d) => { (d.ota || []).forEach((o) => { totals[o.name] = (totals[o.name] || 0) + o.value; }); });
@@ -668,16 +783,16 @@ function Overview({ model, hasData, onUpload, goto }) {
 
   return (
     <div>
-      <SectionTitle sub="Portfolio performance, current month across all properties">Portfolio Overview</SectionTitle>
-      {!hasData && (
+      <SectionTitle sub={sub}>{title}</SectionTitle>
+      {!hasData && onUpload && (
         <div className="ui" onClick={onUpload} style={{ cursor: "pointer", border: `2px dashed ${C.borderStrong}`, borderRadius: 16, padding: "46px 24px", textAlign: "center", background: "#fafbfc", marginBottom: 22 }}>
           <Upload size={26} style={{ color: C.muted }} />
           <div style={{ fontWeight: 600, marginTop: 10, color: C.ink }}>Drop your first file to begin</div>
-          <div style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>RevPAR reports, KPI trackers, reservation exports, or a PDF/screenshot — it'll auto-route to the right property.</div>
+          <div style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>RevPAR reports, KPI trackers, channel production, pace reports, or a PDF/screenshot — name the file with the property and it auto-routes.</div>
         </div>
       )}
 
-      <KpiRow k={portfolioKpi} accent={C.slate} />
+      <KpiRow k={kpi} accent={accent} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
         <Panel title="Revenue by property — current month">
@@ -693,14 +808,13 @@ function Overview({ model, hasData, onUpload, goto }) {
             </ResponsiveContainer>
           ) : <Empty text="Load data to compare properties." />}
         </Panel>
-        <Panel title="Channel mix — all properties">
-          <OtaChart d={{ ota: portfolioOta }} />
-        </Panel>
+        <Panel title={channelTitle}><OtaChart d={{ ota: portfolioOta }} /></Panel>
       </div>
 
-      <div style={{ marginTop: 16 }}><DailyFocus model={model} /></div>
+      <div style={{ marginTop: 16 }}><PacePanel derived={derived} title="Pace & pickup — booked nights vs. same time last year" /></div>
 
-      <div style={{ marginTop: 16 }}><Alerts model={model} /></div>
+      <div style={{ marginTop: 16 }}><DailyFocus model={model} propIds={propIds} /></div>
+      <div style={{ marginTop: 16 }}><Alerts model={model} propIds={propIds} /></div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 16, marginTop: 16 }}>
         {derived.map((d) => (
@@ -723,6 +837,51 @@ function Overview({ model, hasData, onUpload, goto }) {
 }
 function Mini({ label, val }) {
   return <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4 }}>{label}</div><div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontWeight: 700 }}>{val}</div></div>;
+}
+
+/* ---------------- PACE & PICKUP ---------------- */
+function PacePanel({ derived, title }) {
+  const withPace = derived.filter((d) => d.pace);
+  if (!withPace.length) return (
+    <Panel title={title}><Empty text="Pace appears when a pace/pickup report (booked nights, pickup, booking window) is loaded." /></Panel>
+  );
+  const tot = withPace.reduce((a, d) => ({
+    bn: a.bn + d.pace.bookedNights, stly: a.stly + d.pace.bookedNightsSTLY,
+    p7: a.p7 + d.pace.pickup7, p30: a.p30 + d.pace.pickup30,
+    bw: a.bw + (d.pace.bookingWindow || 0), bwN: a.bwN + (d.pace.bookingWindow != null ? 1 : 0),
+  }), { bn: 0, stly: 0, p7: 0, p30: 0, bw: 0, bwN: 0 });
+  const vsStly = tot.stly ? (tot.bn - tot.stly) / tot.stly : null;
+  const chart = withPace.map((d) => ({ name: d.meta.short, "This year": d.pace.bookedNights, "Last year (STLY)": d.pace.bookedNightsSTLY, color: d.meta.color }));
+  return (
+    <Panel title={title}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 14 }}>
+        <PaceStat label="Booked nights" value={tot.bn} sub={vsStly != null ? `${vsStly >= 0 ? "+" : ""}${(vsStly * 100).toFixed(0)}% vs last year` : null} good={vsStly >= 0} />
+        <PaceStat label="Pickup last 7 days" value={tot.p7} sub="net new booked nights" />
+        <PaceStat label="Pickup last 30 days" value={tot.p30} sub="net new booked nights" />
+        <PaceStat label="Avg booking window" value={tot.bwN ? Math.round(tot.bw / tot.bwN) : "—"} sub="days out" raw />
+      </div>
+      <ResponsiveContainer width="100%" height={220}>
+        <BarChart data={chart} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+          <XAxis dataKey="name" tick={{ fontSize: 12, fill: C.muted }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <Tooltip contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          <Bar dataKey="Last year (STLY)" fill="#c9d0da" radius={[4, 4, 0, 0]} />
+          <Bar dataKey="This year" fill={C.slate} radius={[4, 4, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </Panel>
+  );
+}
+function PaceStat({ label, value, sub, good, raw }) {
+  return (
+    <div style={{ background: "#f8f9fb", border: `1px solid ${C.track}`, borderRadius: 11, padding: "12px 14px" }}>
+      <div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>{label}</div>
+      <div style={{ fontFamily: "Georgia,serif", fontSize: 23, fontWeight: 700, marginTop: 5 }}>{raw ? value : (typeof value === "number" ? value.toLocaleString() : value)}</div>
+      {sub && <div className="ui" style={{ fontSize: 11.5, marginTop: 2, color: good == null ? C.muted : good ? C.good : C.bad }}>{sub}</div>}
+    </div>
+  );
 }
 
 /* ---------------- PROPERTY PAGE ---------------- */
@@ -748,20 +907,21 @@ function PropertyPage({ pid, model }) {
         <Panel title="ADR trend"><TrendChart series={d.series} dataKey="adr" color={meta.color} fmt={(v) => "$" + v.toFixed(0)} /></Panel>
         <Panel title="RevPAR trend"><TrendChart series={d.series} dataKey="revpar" color={meta.color} fmt={(v) => "$" + v.toFixed(0)} /></Panel>
       </div>
+      <div style={{ marginTop: 16 }}><PacePanel derived={[d]} title="Pace & pickup" /></div>
       <div style={{ marginTop: 16 }}><PropertyAdvisor d={d} /></div>
     </div>
   );
 }
 
 /* ---------------- DAILY FOCUS ---------------- */
-function DailyFocus({ model }) {
+function DailyFocus({ model, propIds }) {
   const [txt, setTxt] = useState(null); const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
   const run = async () => {
     setBusy(true); setErr(null);
     try {
       const out = await callClaude({
         system: "You are the revenue strategist inside Christian's SHP hotel/STR dashboard. Be concrete and operational. Prioritize pricing moves and revenue generation, and reducing OTA dependency in favor of direct bookings. No fluff.",
-        messages: [{ role: "user", content: `Today is ${new Date().toDateString()}. Here is the current portfolio data:\n\n${snapshotForAI(model)}\n\nGive me TODAY'S FOCUS: the 3 highest-leverage actions to take right now to drive revenue — naming specific properties and whether it's a pricing move, an occupancy push, or an OTA→direct play. Keep each to one tight sentence. Format as 3 numbered lines.` }],
+        messages: [{ role: "user", content: `Today is ${new Date().toDateString()}. Here is the current portfolio data:\n\n${snapshotForAI(model, propIds)}\n\nGive me TODAY'S FOCUS: the 3 highest-leverage actions to take right now to drive revenue — naming specific properties and whether it's a pricing move, an occupancy push, or an OTA→direct play. Keep each to one tight sentence. Format as 3 numbered lines.` }],
         max_tokens: 600,
       });
       setTxt(out);
@@ -778,10 +938,11 @@ function DailyFocus({ model }) {
 }
 
 /* ---------------- ALERTS ---------------- */
-function Alerts({ model }) {
+function Alerts({ model, propIds }) {
   const alerts = useMemo(() => {
     const out = [];
-    PROPERTIES.forEach((p) => {
+    const list = propIds && propIds.length ? PROPERTIES.filter((p) => propIds.includes(p.id)) : PROPERTIES;
+    list.forEach((p) => {
       const d = deriveProperty(p.id, model); if (!d || !d.latest) return;
       const L = d.latest;
       if (L.occ != null && L.occ < 0.45) out.push({ sev: L.occ < 0.25 ? "high" : "med", prop: p, kind: "Low occupancy", detail: `${fmtPct(L.occ)} in ${L.label} — below 45% target.` });
@@ -790,7 +951,7 @@ function Alerts({ model }) {
       if (d.priorY != null) { const py = d.yoy.find((y) => y.month === L.monthName)?.[d.priorY]; const dd = delta(L.revenue, py); if (dd != null && dd < -0.2) out.push({ sev: "high", prop: p, kind: "Revenue below last year", detail: `${L.monthName} rev down ${(dd * 100).toFixed(0)}% YoY.` }); }
     });
     return out.sort((a, b) => (a.sev === "high" ? -1 : 1));
-  }, [model]);
+  }, [model, (propIds || []).join()]);
   return (
     <Panel title="Alerts — low occupancy & rate watch">
       {!alerts.length ? <Empty text="No threshold breaches detected. Load more data to sharpen the watch." />
