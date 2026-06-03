@@ -1,4 +1,5 @@
 // Hostfully sync + discovery. ?debug=1 reports pagination + financial-endpoint probes.
+const VERSION = "probe-v5-2026-06-03";
 const BASE = "https://platform.hostfully.com/api/v3";
 
 async function hfRaw(path, key, method = "GET", body) {
@@ -63,6 +64,7 @@ export default async function handler(req, res) {
         probes.push({ path, status: r.status, keys: r.json && !Array.isArray(r.json) ? Object.keys(r.json).slice(0, 12) : (Array.isArray(r.json) ? `array[${r.json.length}]` : null), money: moneyFrom(r.json || {}) });
       }
       return res.status(200).json({
+        version: VERSION,
         agencyUid,
         pagination: { page0Count: a0.length, page0FirstUid: a0[0]?.uid, page20Count: a20.length, page20FirstUid: a20[0]?.uid, offsetWorks: a0[0]?.uid && a20[0]?.uid && a0[0].uid !== a20[0].uid, leadsPaging: p0._paging || p0._metadata || null },
         financialProbes: probes,
@@ -76,7 +78,7 @@ export default async function handler(req, res) {
     const details = [];
     for (let i = 0; i < booked.length; i += 8) { const chunk = booked.slice(i, i + 8); const got = await Promise.all(chunk.map((l) => hfRaw(`/leads/${l.uid}`, key).then((r) => r.json).catch(() => null))); got.forEach((d, j) => details.push({ lead: chunk[j], detail: d })); }
     const rows = details.map(({ lead, detail }) => ({ propertyName: nameByUid[lead.propertyUid] || "", checkIn: dateOf(lead, "checkIn"), checkOut: dateOf(lead, "checkOut"), amount: moneyFrom(detail || {}) || moneyFrom(lead), source: channelOf(lead) })).filter((r) => r.checkIn && r.amount > 0);
-    return res.status(200).json({ ok: true, count: rows.length, bookedCount: booked.length, propertyCount: propList.length, rows });
+    return res.status(200).json({ version: VERSION, ok: true, count: rows.length, bookedCount: booked.length, propertyCount: propList.length, rows });
   } catch (e) {
     return res.status(500).json({ error: e.message, detail: e.detail });
   }
