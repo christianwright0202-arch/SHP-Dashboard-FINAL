@@ -8,7 +8,7 @@ import { loadModel, saveModel } from "./storage";
 import {
   Upload, TrendingUp, TrendingDown, AlertTriangle, Calendar, Sparkles,
   LayoutGrid, Building2, MessageSquare, Send, RefreshCw, Trash2, FileText,
-  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target, Search, MapPin, Activity, Trophy,
+  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target, Search, MapPin, Activity, Trophy, Briefcase, Plus,
 } from "lucide-react";
 
 /* ============================================================
@@ -20,7 +20,7 @@ const C = {
   panel: "#ffffff",
   border: "#e2e5e9",
   borderStrong: "#d3d7dd",
-  ink: "#1b2330",
+  ink: "#14274d",
   sub: "#566273",
   muted: "#6b7280",
   faint: "#9aa1ad",
@@ -36,15 +36,17 @@ const REGIONS = [
 ];
 const PROPERTIES = [
   // Fort Worth
-  { id: "soma", name: "Hotel SOMA", short: "SOMA", color: "#e07b1f", location: "Fort Worth", units: 31, market: "fortworth", match: /soma/i },
-  { id: "kress", name: "Kress", short: "Kress", color: "#1f7a4d", location: "Fort Worth", units: 7, market: "fortworth", match: /kress/i },
-  { id: "harley", name: "Harley", short: "Harley", color: "#6a3da8", location: "Fort Worth", units: 3, market: "fortworth", match: /harley/i },
+  { id: "soma", name: "Hotel SOMA", short: "SOMA", color: "#e07b1f", location: "Fort Worth", units: 31, market: "fortworth", goal: 100000, match: /soma/i },
+  { id: "kress", name: "Kress", short: "Kress", color: "#1f7a4d", location: "Fort Worth", units: 7, market: "fortworth", goal: 45000, match: /kress/i },
+  { id: "harley", name: "Harley", short: "Harley", color: "#6a3da8", location: "Fort Worth", units: 3, market: "fortworth", goal: 30000, match: /harley/i },
   // Arlington
-  { id: "rambler", name: "The Rambler Inn", short: "Rambler", color: "#cf3a3a", location: "Arlington", units: 22, market: "arlington", match: /rambler/i },
-  { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 18, market: "arlington", match: /(ballpark|ryan)/i },
-  { id: "woodbrook", name: "Woodbrook", short: "Woodbrook", color: "#138a8a", location: "Arlington", units: 1, market: "arlington", match: /woodbrook/i },
-  { id: "rogers", name: "Rogers", short: "Rogers", color: "#b5651d", location: "Arlington", units: 2, market: "arlington", match: /rogers/i },
+  { id: "rambler", name: "The Rambler Inn", short: "Rambler", color: "#cf3a3a", location: "Arlington", units: 22, market: "arlington", goal: 100000, match: /rambler/i },
+  { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 18, market: "arlington", goal: 60000, match: /(ballpark|ryan)/i },
+  { id: "woodbrook", name: "Woodbrook", short: "Woodbrook", color: "#138a8a", location: "Arlington", units: 1, market: "arlington", goal: 8000, match: /woodbrook/i },
+  { id: "rogers", name: "Rogers", short: "Rogers", color: "#b5651d", location: "Arlington", units: 2, market: "arlington", goal: 16000, match: /rogers/i },
 ];
+// Default OTA commission rates for net-of-fee view (editable assumption)
+const CHANNEL_FEES = { Airbnb: 0.15, Vrbo: 0.08, Expedia: 0.17, "Booking.com": 0.15, Direct: 0, Other: 0.12 };
 const PROPS_IN = (region) => PROPERTIES.filter((p) => p.market === region);
 const PROP_BY_ID = Object.fromEntries(PROPERTIES.map((p) => [p.id, p]));
 
@@ -52,7 +54,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 const MONTH_IDX = Object.fromEntries(MONTHS.map((m, i) => [m.toLowerCase(), i]));
 const OTA_COLORS = { Airbnb: "#e23b3b", Vrbo: "#1668e3", Expedia: "#f5c518", "Booking.com": "#f08a24", Direct: "#1f7a4d", Other: "#94a3b8" };
 
-const MODEL = { properties: {}, events: [], eventsSource: "none", lastUpdated: null };
+const MODEL = { properties: {}, events: [], eventsSource: "none", lastUpdated: null, goals: {}, activity: [], deals: [] };
 
 // World Cup window + AT&T Stadium (Dallas Stadium), Arlington fixtures
 const WC_START = "2026-06-12", WC_END = "2026-07-15";
@@ -359,6 +361,9 @@ function applyRecords(model, records) {
       if (rec.kind === "res") {
         cur.revenue += rec.revenue; cur.nights += rec.nights || 0;
         p.ota[rec.source] = (p.ota[rec.source] || 0) + rec.revenue;
+        const obm = (p.otaByMonth = p.otaByMonth || {});
+        const mo = (obm[rec.month] = obm[rec.month] || {});
+        mo[rec.source] = (mo[rec.source] || 0) + rec.revenue;
       } else {
         cur.revenue = rec.revenue;
         if (rec.nights != null) cur.nights = rec.nights;
@@ -371,6 +376,22 @@ function applyRecords(model, records) {
   }
   next.lastUpdated = new Date().toISOString();
   return next;
+}
+
+/* build an activity log by diffing two models after an upload */
+function buildActivity(before, after, fname) {
+  const entries = []; const ts = new Date().toISOString();
+  for (const pid of Object.keys(after.properties)) {
+    const bd = before.properties[pid] ? deriveProperty(pid, before) : null;
+    const ad = deriveProperty(pid, after);
+    if (!ad) continue;
+    const bRev = bd?.currentMonth?.revenue || 0; const aRev = ad.currentMonth?.revenue || 0;
+    if (Math.abs(aRev - bRev) > 1) {
+      entries.push({ ts, pid, text: `${ad.meta.name}: ${ad.currentMonth.label} revenue ${bRev ? "updated to" : "set to"} ${fmtMoney(aRev)}${bRev ? ` (was ${fmtMoney(bRev)})` : ""}` });
+    }
+  }
+  if (!entries.length) entries.push({ ts, pid: null, text: `Loaded ${fname}` });
+  return entries;
 }
 
 /* derive KPIs for a property */
@@ -435,8 +456,34 @@ function deriveProperty(pid, model) {
     prevRevenue: pmRow ? (pmRow.revenue || 0) : null,
     has: !!cmRow,
   };
+  // run-rate forecast for the current month
+  const dim = daysInMonth(now.getFullYear(), now.getMonth());
+  const dayOfMonth = now.getDate();
+  const fracElapsed = dayOfMonth / dim;
+  const onBooks = currentMonth.revenue;
+  // early in the month, advance bookings dominate, so on-the-books is the best estimate;
+  // later, blend in a run-rate projection
+  const runRate = fracElapsed > 0 ? onBooks / fracElapsed : onBooks;
+  const projection = fracElapsed < 0.5 ? Math.max(onBooks, runRate * 0.5 + onBooks * 0.5) : runRate;
+  const forecast = { onBooks, projection, fracElapsed, dim, dayOfMonth };
 
-  return { pid, meta, series, latest, prev, snap, yoy, years, curY, priorY, ota, raw: p, currentMonth, ytd, ytdPrior, ytdYear: thisYear, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+  const otaByMonth = p.otaByMonth || {};
+  const goal = (model.goals && model.goals[pid] != null) ? model.goals[pid] : (meta.goal || null);
+
+  return { pid, meta, series, latest, prev, snap, yoy, years, curY, priorY, ota, raw: p, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+}
+
+// Composite property health score (0-100)
+function healthScore(d) {
+  if (!d || !d.latest) return null;
+  const L = d.latest;
+  const occScore = L.occ != null ? Math.min(1, L.occ / 0.75) : 0.5;           // target 75% occ
+  const goalScore = d.goal ? Math.min(1, (d.currentMonth.revenue || 0) / d.goal) : 0.5;
+  let yoyScore = 0.5;
+  if (d.priorY != null) { const py = d.yoy.find((y) => y.month === L.monthName)?.[d.priorY]; const dd = delta(L.revenue, py); if (dd != null) yoyScore = Math.max(0, Math.min(1, 0.5 + dd)); }
+  const paceScore = d.pace && d.pace.bookedNightsSTLY ? Math.max(0, Math.min(1, d.pace.bookedNights / d.pace.bookedNightsSTLY)) : 0.5;
+  const score = Math.round((occScore * 0.3 + goalScore * 0.3 + yoyScore * 0.25 + paceScore * 0.15) * 100);
+  return { score, parts: { occScore, goalScore, yoyScore, paceScore } };
 }
 
 // Build the normalized 5-card KPI object for a single property
@@ -555,7 +602,7 @@ function Dashboard() {
 
   const handleFiles = useCallback(async (files) => {
     setBusy(true); setIngestMsg(null);
-    let added = 0, errors = [];
+    let added = 0, errors = [], routed = {};
     for (const file of files) {
       try {
         const ext = file.name.split(".").pop().toLowerCase();
@@ -572,12 +619,21 @@ function Dashboard() {
           records = await extractFromImageOrPdf(file);
           if (propOverride !== "auto") records = records.map((r) => ({ ...r, prop: propOverride }));
         } else { errors.push(`${file.name}: unsupported type`); continue; }
-        if (records.length) { setModel((m) => applyRecords(m, records)); added += records.length; }
-        else errors.push(`${file.name}: no recognizable rows`);
+        records.forEach((r) => { if (r.prop && r.prop !== "unknown") routed[r.prop] = (routed[r.prop] || 0) + 1; });
+        if (records.length) {
+          setModel((m) => {
+            const before = m;
+            const after = applyRecords(m, records);
+            after.activity = buildActivity(before, after, file.name).concat(after.activity || []).slice(0, 40);
+            return after;
+          });
+          added += records.length;
+        } else errors.push(`${file.name}: no recognizable rows`);
       } catch (e) { errors.push(`${file.name}: ${e.message}`); }
     }
     setBusy(false);
-    setIngestMsg({ ok: added > 0, text: added ? `Ingested ${added} records.` : "Nothing ingested. " + errors.join("; "), errors });
+    const routedTxt = Object.keys(routed).length ? " → " + Object.keys(routed).map((id) => `${PROP_BY_ID[id]?.name || id} (${routed[id]})`).join(", ") : "";
+    setIngestMsg({ ok: added > 0, text: added ? `Ingested ${added} records${routedTxt}.` : "Nothing ingested. " + errors.join("; "), errors });
   }, [propOverride]);
 
   const onDrop = (e) => { e.preventDefault(); if (e.dataTransfer.files?.length) handleFiles([...e.dataTransfer.files]); };
@@ -619,6 +675,7 @@ function Dashboard() {
           <NavItem icon={<Calendar size={17} />} label="Events" active={page === "events"} onClick={() => setPage("events")} color="#8ea0b8" />
           <NavItem icon={<MessageSquare size={17} />} label="Ask the Board" active={page === "ask"} onClick={() => setPage("ask")} color="#8ea0b8" />
           <NavItem icon={<Search size={17} />} label="Data Audit" active={page === "audit"} onClick={() => setPage("audit")} color="#8ea0b8" />
+          <NavItem icon={<Briefcase size={17} />} label="Sales Pipeline" active={page === "sales"} onClick={() => setPage("sales")} color="#8ea0b8" />
 
           <div style={{ marginTop: 24, padding: "0 8px" }}>
             <div style={{ fontSize: 10, color: "#6c7d96" }}>
@@ -670,7 +727,8 @@ function Dashboard() {
                 : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
                   : page === "ask" ? <AskPage model={model} />
                     : page === "audit" ? <AuditPage model={model} />
-                    : <PropertyPage pid={page} model={model} />}
+                    : page === "sales" ? <SalesPipeline model={model} setModel={setModel} />
+                    : <PropertyPage pid={page} model={model} setModel={setModel} />}
           </div>
         </main>
       </div>
@@ -755,26 +813,32 @@ function YoyChart({ d }) {
     </ResponsiveContainer>
   );
 }
+const STANDARD_CHANNELS = ["Airbnb", "Vrbo", "Expedia", "Booking.com", "Direct"];
 function OtaChart({ d }) {
-  if (!d?.ota?.length) return <Empty text="OTA mix appears when reservation-level data (with a SOURCE column) is loaded." />;
-  const total = d.ota.reduce((a, o) => a + o.value, 0);
+  const map = {}; (d?.ota || []).forEach((o) => { map[o.name] = (map[o.name] || 0) + o.value; });
+  const total = Object.values(map).reduce((a, v) => a + v, 0);
+  // always show all five standard channels (plus any extras like "Other"), even at $0
+  const names = [...STANDARD_CHANNELS, ...Object.keys(map).filter((n) => !STANDARD_CHANNELS.includes(n))];
+  const rows = names.map((name) => ({ name, value: map[name] || 0 }));
+  const pieData = rows.filter((r) => r.value > 0);
+  if (!total) return <Empty text="Channel mix appears once channel/reservation data (with a source column) is loaded. All five channels will populate here." />;
   return (
     <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
       <ResponsiveContainer width={200} height={200}>
         <PieChart>
-          <Pie data={d.ota} dataKey="value" nameKey="name" innerRadius={52} outerRadius={86} paddingAngle={2}>
-            {d.ota.map((o) => <Cell key={o.name} fill={OTA_COLORS[o.name] || OTA_COLORS.Other} />)}
+          <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={52} outerRadius={86} paddingAngle={2}>
+            {pieData.map((o) => <Cell key={o.name} fill={OTA_COLORS[o.name] || OTA_COLORS.Other} />)}
           </Pie>
           <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
         </PieChart>
       </ResponsiveContainer>
       <div className="ui" style={{ flex: 1, minWidth: 160 }}>
-        {d.ota.sort((a, b) => b.value - a.value).map((o) => (
-          <div key={o.name} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", fontSize: 13, borderBottom: `1px solid ${C.track}` }}>
+        {rows.sort((a, b) => b.value - a.value).map((o) => (
+          <div key={o.name} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", fontSize: 13, borderBottom: `1px solid ${C.track}`, opacity: o.value ? 1 : 0.5 }}>
             <span style={{ width: 11, height: 11, borderRadius: 3, background: OTA_COLORS[o.name] || OTA_COLORS.Other }} />
             <span style={{ flex: 1, color: C.ink }}>{o.name}</span>
             <span style={{ fontWeight: 600 }}>{fmtMoney(o.value)}</span>
-            <span style={{ color: C.muted, width: 44, textAlign: "right" }}>{((o.value / total) * 100).toFixed(0)}%</span>
+            <span style={{ color: C.muted, width: 44, textAlign: "right" }}>{total ? ((o.value / total) * 100).toFixed(0) : 0}%</span>
           </div>
         ))}
       </div>
@@ -856,6 +920,7 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
       )}
 
       <KpiRow k={kpi} accent={accent} />
+      <PeriodBreakdown derived={derived} accent={accent} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
         <Panel title="Revenue by property — current month">
@@ -876,7 +941,21 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
 
       <div style={{ marginTop: 16 }}><PacePanel derived={derived} title="Pace & pickup — booked nights vs. same time last year" /></div>
 
-      <div style={{ marginTop: 16 }}><DailyFocus model={model} propIds={propIds} /></div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+        <ForecastPanel derived={derived} />
+        <Leaderboard derived={derived} />
+      </div>
+
+      <div style={{ marginTop: 16 }}><ChannelOverTime derived={derived} /></div>
+      <div style={{ marginTop: 16 }}><HealthBoard derived={derived} goto={goto} /></div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16, marginTop: 16 }}>
+        <div><DailyFocus model={model} propIds={propIds} /></div>
+        <div style={{ display: "grid", gap: 16 }}>
+          <ActivityFeed model={model} propIds={propIds} />
+          <SlackDigest model={model} propIds={propIds} />
+        </div>
+      </div>
       <div style={{ marginTop: 16 }}><Alerts model={model} propIds={propIds} /></div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 16, marginTop: 16 }}>
@@ -900,6 +979,51 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
 }
 function Mini({ label, val }) {
   return <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4 }}>{label}</div><div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontWeight: 700 }}>{val}</div></div>;
+}
+
+/* period toggle (MTD / QTD / YTD / trailing 12) with per-property drill-down */
+const PERIODS = [{ id: "mtd", label: "This month" }, { id: "qtd", label: "This quarter" }, { id: "ytd", label: "YTD" }, { id: "t12", label: "Last 12 mo" }];
+function periodRange(id) {
+  const now = new Date(); const y = now.getFullYear(); const m = now.getMonth();
+  if (id === "mtd") return (s) => s.year === y && s.mIdx === m;
+  if (id === "qtd") { const qs = Math.floor(m / 3) * 3; return (s) => s.year === y && s.mIdx >= qs && s.mIdx <= m; }
+  if (id === "ytd") return (s) => s.year === y && s.mIdx <= m;
+  const cutoff = new Date(y, m - 11, 1); return (s) => { const sd = new Date(s.year, s.mIdx, 1); return sd >= cutoff && sd <= new Date(y, m, 1); };
+}
+function PeriodBreakdown({ derived, accent }) {
+  const [period, setPeriod] = useState("mtd");
+  const [open, setOpen] = useState(false);
+  const inRange = periodRange(period);
+  const rows = derived.map((d) => ({ name: d.meta.short, color: d.meta.color, rev: d.series.filter(inRange).reduce((a, s) => a + (s.revenue || 0), 0) }))
+    .filter((r) => r.rev > 0).sort((a, b) => b.rev - a.rev);
+  const total = rows.reduce((a, r) => a + r.rev, 0);
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 18px", marginTop: 16 }}>
+      <div className="ui" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        {PERIODS.map((p) => (
+          <button key={p.id} onClick={() => setPeriod(p.id)} style={{ background: period === p.id ? accent : "#fff", color: period === p.id ? "#fff" : C.sub, border: `1px solid ${period === p.id ? accent : C.border}`, borderRadius: 7, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{p.label}</button>
+        ))}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span className="ui" style={{ fontSize: 12, color: C.muted }}>Revenue</span>
+          <span style={{ fontFamily: "Georgia,serif", fontSize: 24, fontWeight: 700, color: C.ink }}>{fmtMoney(total)}</span>
+          <button className="ui" onClick={() => setOpen(!open)} style={{ background: "transparent", border: "none", color: accent, cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}>{open ? "Hide" : "Drill down"}</button>
+        </div>
+      </div>
+      {open && (
+        <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
+          {!rows.length ? <Empty text="No revenue in this period yet." /> : rows.map((r) => (
+            <div key={r.name} className="ui" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ width: 9, height: 9, borderRadius: 9, background: r.color }} />
+              <span style={{ width: 90, fontSize: 13 }}>{r.name}</span>
+              <div style={{ flex: 1, background: C.track, borderRadius: 5, height: 8 }}><div style={{ width: `${(r.rev / rows[0].rev) * 100}%`, height: "100%", borderRadius: 5, background: r.color }} /></div>
+              <span style={{ width: 90, textAlign: "right", fontSize: 13, fontWeight: 700 }}>{fmtMoney(r.rev)}</span>
+              <span style={{ width: 44, textAlign: "right", fontSize: 12, color: C.muted }}>{total ? ((r.rev / total) * 100).toFixed(0) : 0}%</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ---------------- PACE & PICKUP ---------------- */
@@ -947,8 +1071,186 @@ function PaceStat({ label, value, sub, good, raw }) {
   );
 }
 
+/* ---------------- FORECAST ---------------- */
+function ForecastPanel({ derived }) {
+  const agg = derived.reduce((a, d) => {
+    a.onBooks += d.forecast?.onBooks || 0; a.proj += d.forecast?.projection || 0;
+    a.goal += d.goal || 0; a.frac = d.forecast?.fracElapsed ?? a.frac; a.label = d.currentMonth?.label || a.label;
+    return a;
+  }, { onBooks: 0, proj: 0, goal: 0, frac: 0, label: "" });
+  const toGoal = agg.goal ? agg.proj / agg.goal : null;
+  return (
+    <Panel title="Month-end forecast (run-rate)">
+      <div className="ui" style={{ fontSize: 12.5, color: C.muted, marginBottom: 10 }}>{agg.label} · {(agg.frac * 100).toFixed(0)}% of month elapsed</div>
+      <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
+        <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>On the books</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700 }}>{fmtMoney(agg.onBooks)}</div></div>
+        <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>Projected month-end</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700, color: "#14274d" }}>{fmtMoney(agg.proj)}</div></div>
+        {agg.goal > 0 && <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>vs Goal</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700, color: toGoal >= 1 ? C.good : C.bad }}>{fmtPct(toGoal)}</div></div>}
+      </div>
+      <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 10 }}>Projection blends on-the-books with run-rate; most accurate once the month is underway and with daily pacing data.</div>
+    </Panel>
+  );
+}
+
+/* ---------------- LEADERBOARD ---------------- */
+function Leaderboard({ derived }) {
+  const [metric, setMetric] = useState("revpar");
+  const rows = derived.map((d) => {
+    const py = d.priorY != null ? d.yoy.find((y) => y.month === d.latest?.monthName)?.[d.priorY] : null;
+    const yoy = py ? delta(d.latest?.revenue, py) : null;
+    const goalAtt = d.goal ? (d.currentMonth?.revenue || 0) / d.goal : null;
+    return { name: d.meta.short, color: d.meta.color, revpar: d.latest?.revpar ?? null, yoy, goal: goalAtt };
+  }).filter((r) => r[metric] != null).sort((a, b) => (b[metric] || -1) - (a[metric] || -1));
+  const fmt = (v) => metric === "revpar" ? fmtMoney(v) : fmtPct(v);
+  const max = Math.max(...rows.map((r) => Math.abs(r[metric] || 0)), 1);
+  return (
+    <Panel title="Leaderboard" right={
+      <select value={metric} onChange={(e) => setMetric(e.target.value)} className="ui" style={{ fontSize: 12, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}` }}>
+        <option value="revpar">RevPAR</option><option value="yoy">YoY growth</option><option value="goal">Goal attainment</option>
+      </select>}>
+      {!rows.length ? <Empty text="Load data to rank properties." /> : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {rows.map((r, i) => (
+            <div key={r.name} className="ui" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ width: 18, fontWeight: 700, color: C.faint, fontSize: 13 }}>{i + 1}</span>
+              <span style={{ width: 9, height: 9, borderRadius: 9, background: r.color }} />
+              <span style={{ width: 86, fontSize: 13, fontWeight: 600 }}>{r.name}</span>
+              <div style={{ flex: 1, background: C.track, borderRadius: 5, height: 8 }}>
+                <div style={{ width: `${Math.max(3, (Math.abs(r[metric] || 0) / max) * 100)}%`, height: "100%", borderRadius: 5, background: r.color }} />
+              </div>
+              <span style={{ width: 64, textAlign: "right", fontSize: 13, fontWeight: 700 }}>{fmt(r[metric])}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/* ---------------- CHANNEL OVER TIME + NET-OF-FEE ---------------- */
+function ChannelOverTime({ derived }) {
+  const [net, setNet] = useState(false);
+  const monthly = {};
+  derived.forEach((d) => {
+    Object.entries(d.otaByMonth || {}).forEach(([m, chans]) => {
+      const row = (monthly[m] = monthly[m] || {});
+      Object.entries(chans).forEach(([c, v]) => { row[c] = (row[c] || 0) + (net ? v * (1 - (CHANNEL_FEES[c] ?? 0.12)) : v); });
+    });
+  });
+  const months = Object.keys(monthly).sort();
+  const data = months.map((m) => { const [y, mo] = m.split("-").map(Number); return { label: `${MONTHS[mo - 1]} '${String(y).slice(2)}`, ...monthly[m] }; });
+  const present = STANDARD_CHANNELS.filter((c) => data.some((d) => d[c]));
+  return (
+    <Panel title="Channel contribution over time" right={
+      <button className="ui" onClick={() => setNet(!net)} style={{ fontSize: 12, padding: "5px 11px", borderRadius: 7, border: `1px solid ${C.border}`, background: net ? "#14274d" : "#fff", color: net ? "#fff" : C.sub, cursor: "pointer", fontWeight: 600 }}>
+        {net ? "Net of fees" : "Gross"}
+      </button>}>
+      {!data.length ? <Empty text="Load channel-level data (your Channel Production export) to see this." /> : (
+        <ResponsiveContainer width="100%" height={250}>
+          <AreaChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+            <XAxis dataKey="label" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
+            <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            {present.map((c) => <Area key={c} type="monotone" dataKey={c} stackId="1" stroke={OTA_COLORS[c]} fill={OTA_COLORS[c]} fillOpacity={0.55} />)}
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+      {net && <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 8 }}>Net applies assumed commissions: Airbnb 15%, Booking.com 15%, Expedia 17%, Vrbo 8%, Direct 0%.</div>}
+    </Panel>
+  );
+}
+
+/* ---------------- HEALTH SCORES ---------------- */
+function HealthBoard({ derived, goto }) {
+  const scored = derived.map((d) => ({ d, h: healthScore(d) })).filter((x) => x.h).sort((a, b) => a.h.score - b.h.score);
+  const ring = (score, color) => {
+    const c = score >= 70 ? C.good : score >= 45 ? "#b7791f" : C.bad;
+    return (
+      <svg width="54" height="54" viewBox="0 0 54 54">
+        <circle cx="27" cy="27" r="22" fill="none" stroke={C.track} strokeWidth="6" />
+        <circle cx="27" cy="27" r="22" fill="none" stroke={c} strokeWidth="6" strokeDasharray={`${(score / 100) * 138} 138`} strokeLinecap="round" transform="rotate(-90 27 27)" />
+        <text x="27" y="32" textAnchor="middle" fontSize="15" fontWeight="700" fill={C.ink} fontFamily="Georgia,serif">{score}</text>
+      </svg>
+    );
+  };
+  return (
+    <Panel title="Property health — composite score (occupancy · goal · YoY · pace)">
+      {!scored.length ? <Empty text="Load data to score properties." /> : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(190px,1fr))", gap: 12 }}>
+          {scored.map(({ d, h }) => (
+            <div key={d.pid} onClick={() => goto && goto(d.pid)} className="ui" style={{ cursor: goto ? "pointer" : "default", display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 11, background: "#f8f9fb", border: `1px solid ${C.track}`, borderLeft: `4px solid ${d.meta.color}` }}>
+              {ring(h.score, d.meta.color)}
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 13.5 }}>{d.meta.short}</div>
+                <div style={{ fontSize: 11, color: C.muted }}>{h.score >= 70 ? "Healthy" : h.score >= 45 ? "Watch" : "Needs attention"}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/* ---------------- ACTIVITY FEED ---------------- */
+function ActivityFeed({ model, propIds }) {
+  const items = (model.activity || []).filter((a) => !propIds || !a.pid || propIds.includes(a.pid)).slice(0, 12);
+  return (
+    <Panel title="Recent activity">
+      {!items.length ? <Empty text="Changes show here after each upload." /> : (
+        <div style={{ display: "grid", gap: 9 }}>
+          {items.map((a, i) => (
+            <div key={i} className="ui" style={{ display: "flex", gap: 9, fontSize: 12.5, color: C.sub, borderBottom: `1px solid ${C.track}`, paddingBottom: 8 }}>
+              <Activity size={14} style={{ color: a.pid ? PROP_BY_ID[a.pid]?.color : C.faint, flexShrink: 0, marginTop: 2 }} />
+              <div><div>{a.text}</div><div style={{ fontSize: 10.5, color: C.faint }}>{new Date(a.ts).toLocaleString()}</div></div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/* ---------------- GOAL TRACKER ---------------- */
+function GoalTracker({ d, model, setModel }) {
+  const goal = d.goal || 0;
+  const rev = d.currentMonth?.revenue || 0;
+  const pct = goal ? rev / goal : null;
+  const frac = d.forecast?.fracElapsed || 0;
+  const onTrack = pct != null ? pct >= frac : null;
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(goal);
+  const save = () => { const n = Number(val) || 0; setModel((m) => ({ ...m, goals: { ...(m.goals || {}), [d.pid]: n } })); setEditing(false); };
+  return (
+    <Panel title={`Monthly goal — ${d.currentMonth?.label || ""}`} right={
+      editing
+        ? <span className="ui" style={{ display: "flex", gap: 6 }}><input value={val} onChange={(e) => setVal(e.target.value)} style={{ width: 90, fontSize: 12, padding: "4px 7px", borderRadius: 6, border: `1px solid ${C.border}` }} /><button onClick={save} style={{ ...btnSm, padding: "5px 10px" }}>Save</button></span>
+        : <button className="ui" onClick={() => { setVal(goal); setEditing(true); }} style={{ fontSize: 12, padding: "5px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.sub, cursor: "pointer" }}>Edit goal</button>
+    }>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <div style={{ fontFamily: "Georgia,serif", fontSize: 30, fontWeight: 700, color: d.meta.color }}>{fmtMoney(rev)}</div>
+        <div className="ui" style={{ color: C.muted, fontSize: 14 }}>of {fmtMoney(goal)} goal</div>
+        {pct != null && <div className="ui" style={{ marginLeft: "auto", fontWeight: 700, fontSize: 18, color: pct >= 1 ? C.good : C.ink }}>{fmtPct(pct)}</div>}
+      </div>
+      <div style={{ background: C.track, borderRadius: 8, height: 14, marginTop: 12, position: "relative", overflow: "hidden" }}>
+        <div style={{ width: `${Math.min(100, (pct || 0) * 100)}%`, height: "100%", background: d.meta.color, borderRadius: 8 }} />
+        <div title="Today's pace marker" style={{ position: "absolute", left: `${Math.min(100, frac * 100)}%`, top: -3, bottom: -3, width: 2, background: C.ink }} />
+      </div>
+      {onTrack != null && (
+        <div className="ui" style={{ marginTop: 10, fontSize: 13, fontWeight: 600, color: onTrack ? C.good : C.bad }}>
+          {onTrack ? "On pace" : "Behind pace"} — {fmtPct(pct)} of goal with {(frac * 100).toFixed(0)}% of the month elapsed
+          {!onTrack && goal ? `. Need ${fmtMoney(goal - rev)} more.` : "."}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+
 /* ---------------- PROPERTY PAGE ---------------- */
-function PropertyPage({ pid, model }) {
+function PropertyPage({ pid, model, setModel }) {
   const d = useMemo(() => deriveProperty(pid, model), [pid, model]);
   const meta = PROP_BY_ID[pid];
   if (!d) return (<><SectionTitle sub={`${meta.location} · ${meta.units} units`}>{meta.name}</SectionTitle><Panel title="No data"><Empty text={`Upload a file for ${meta.name} (or any combined export) to populate this page.`} /></Panel></>);
@@ -960,6 +1262,10 @@ function PropertyPage({ pid, model }) {
           <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{meta.location} · {meta.units} units · latest {d.latest?.label || "—"}</div></div>
       </div>
       <KpiRow k={buildKpi(d)} accent={meta.color} />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+        <GoalTracker d={d} model={model} setModel={setModel} />
+        <ForecastPanel derived={[d]} />
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
         <Panel title="Year-over-year revenue"><YoyChart d={d} /></Panel>
         <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
@@ -971,6 +1277,7 @@ function PropertyPage({ pid, model }) {
         <Panel title="RevPAR trend"><TrendChart series={d.series} dataKey="revpar" color={meta.color} fmt={(v) => "$" + v.toFixed(0)} /></Panel>
       </div>
       <div style={{ marginTop: 16 }}><PacePanel derived={[d]} title="Pace & pickup" /></div>
+      <div style={{ marginTop: 16 }}><ChannelOverTime derived={[d]} /></div>
       <div style={{ marginTop: 16 }}><PropertyAdvisor d={d} /></div>
     </div>
   );
@@ -1267,6 +1574,176 @@ function AuditCell({ value, fromFile }) {
       {value}
       <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: fromFile ? "#1f7a4d" : "#b7791f" }}>{value === "—" ? "" : fromFile ? "from file" : "computed"}</span>
     </td>
+  );
+}
+
+/* ---------------- SALES PIPELINE (group/corporate CRM) ---------------- */
+const DEAL_STAGES = [
+  { id: "lead", label: "Lead", color: "#8ea0b8" },
+  { id: "proposal", label: "Proposal", color: "#3b7dd8" },
+  { id: "contract", label: "Contract Out", color: "#e07b1f" },
+  { id: "won", label: "Won", color: "#1f7a4d" },
+  { id: "lost", label: "Lost", color: "#cf3a3a" },
+];
+function SalesPipeline({ model, setModel }) {
+  const deals = model.deals || [];
+  const [adding, setAdding] = useState(false);
+  const blank = { id: "", company: "", contact: "", property: "soma", value: "", nights: "", stage: "lead", arrival: "", notes: "" };
+  const [form, setForm] = useState(blank);
+
+  const upsert = (deal) => setModel((m) => {
+    const list = m.deals || [];
+    const exists = list.some((x) => x.id === deal.id);
+    const next = exists ? list.map((x) => (x.id === deal.id ? deal : x)) : [...list, deal];
+    return { ...m, deals: next };
+  });
+  const removeDeal = (id) => setModel((m) => ({ ...m, deals: (m.deals || []).filter((x) => x.id !== id) }));
+  const move = (deal, stage) => upsert({ ...deal, stage, ...(stage === "won" ? { wonAt: new Date().toISOString() } : {}) });
+  const submit = () => {
+    if (!form.company) return;
+    const d = { ...form, id: form.id || "d" + Date.now(), value: Number(form.value) || 0, nights: Number(form.nights) || 0, createdAt: form.createdAt || new Date().toISOString() };
+    upsert(d); setForm(blank); setAdding(false);
+  };
+
+  // funnel metrics
+  const open = deals.filter((d) => !["won", "lost"].includes(d.stage));
+  const won = deals.filter((d) => d.stage === "won");
+  const lost = deals.filter((d) => d.stage === "lost");
+  const decided = won.length + lost.length;
+  const winRate = decided ? won.length / decided : null;
+  const avgWon = won.length ? won.reduce((a, d) => a + (d.value || 0), 0) / won.length : null;
+  const pipelineValue = open.reduce((a, d) => a + (d.value || 0), 0);
+  const wonValue = won.reduce((a, d) => a + (d.value || 0), 0);
+  const ttc = (() => {
+    const days = won.filter((d) => d.wonAt && d.createdAt).map((d) => (new Date(d.wonAt) - new Date(d.createdAt)) / 86400000);
+    return days.length ? Math.round(days.reduce((a, b) => a + b, 0) / days.length) : null;
+  })();
+
+  const field = (k, label, props = {}) => (
+    <label className="ui" style={{ fontSize: 11.5, color: C.muted, display: "block" }}>{label}
+      <input value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} {...props}
+        style={{ width: "100%", marginTop: 3, fontSize: 13, padding: "7px 9px", borderRadius: 7, border: `1px solid ${C.border}`, boxSizing: "border-box" }} />
+    </label>
+  );
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
+        <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>Sales Pipeline</h1>
+          <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>Group, corporate & convention bookings across the portfolio</div></div>
+        <button className="ui" onClick={() => { setForm(blank); setAdding(true); }} style={{ ...btnSm, marginLeft: "auto" }}><Plus size={14} /> New deal</button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 12, margin: "16px 0" }}>
+        <FunnelStat label="Open pipeline" value={fmtMoney(pipelineValue)} sub={`${open.length} active deals`} />
+        <FunnelStat label="Won (booked)" value={fmtMoney(wonValue)} sub={`${won.length} deals`} good />
+        <FunnelStat label="Win rate" value={winRate != null ? fmtPct(winRate) : "—"} sub={decided ? `${won.length}/${decided} decided` : "no closed deals"} />
+        <FunnelStat label="Avg deal size" value={avgWon != null ? fmtMoney(avgWon) : "—"} sub="won deals" />
+        <FunnelStat label="Avg time to close" value={ttc != null ? ttc + " days" : "—"} sub="lead → won" />
+      </div>
+
+      {adding && (
+        <Panel title={form.id ? "Edit deal" : "New deal"} style={{ marginBottom: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+            {field("company", "Company / group")}
+            {field("contact", "Contact")}
+            <label className="ui" style={{ fontSize: 11.5, color: C.muted, display: "block" }}>Property
+              <select value={form.property} onChange={(e) => setForm({ ...form, property: e.target.value })} style={{ width: "100%", marginTop: 3, fontSize: 13, padding: "7px 9px", borderRadius: 7, border: `1px solid ${C.border}` }}>
+                {PROPERTIES.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </label>
+            {field("value", "Est. value ($)", { type: "number" })}
+            {field("nights", "Room nights", { type: "number" })}
+            {field("arrival", "Arrival date", { type: "date" })}
+            <label className="ui" style={{ fontSize: 11.5, color: C.muted, display: "block" }}>Stage
+              <select value={form.stage} onChange={(e) => setForm({ ...form, stage: e.target.value })} style={{ width: "100%", marginTop: 3, fontSize: 13, padding: "7px 9px", borderRadius: 7, border: `1px solid ${C.border}` }}>
+                {DEAL_STAGES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+              </select>
+            </label>
+            <div style={{ gridColumn: "span 2" }}>{field("notes", "Notes")}</div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button onClick={submit} style={btnSm}>Save deal</button>
+            <button onClick={() => setAdding(false)} className="ui" style={{ fontSize: 12.5, padding: "7px 12px", borderRadius: 8, border: `1px solid ${C.border}`, background: "#fff", cursor: "pointer" }}>Cancel</button>
+          </div>
+        </Panel>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${DEAL_STAGES.length},1fr)`, gap: 10, alignItems: "start" }}>
+        {DEAL_STAGES.map((stage) => {
+          const col = deals.filter((d) => d.stage === stage.id);
+          const sum = col.reduce((a, d) => a + (d.value || 0), 0);
+          return (
+            <div key={stage.id} style={{ background: "#f4f5f7", borderRadius: 12, padding: 10, minHeight: 120 }}>
+              <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 8, background: stage.color }} />
+                <span style={{ fontWeight: 700, fontSize: 12.5 }}>{stage.label}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11, color: C.muted }}>{col.length} · {fmtMoney(sum)}</span>
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {col.map((d) => (
+                  <div key={d.id} style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 9, padding: 10, borderLeft: `3px solid ${PROP_BY_ID[d.property]?.color || C.muted}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
+                      <span style={{ fontWeight: 700, fontSize: 13 }}>{d.company}</span>
+                      <span className="ui" style={{ display: "flex", gap: 4 }}>
+                        <button title="Edit" onClick={() => { setForm({ ...blank, ...d, value: String(d.value || ""), nights: String(d.nights || "") }); setAdding(true); }} style={iconBtn}>✎</button>
+                        <button title="Delete" onClick={() => removeDeal(d.id)} style={iconBtn}>×</button>
+                      </span>
+                    </div>
+                    <div className="ui" style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{PROP_BY_ID[d.property]?.short}{d.contact ? " · " + d.contact : ""}</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 12 }}>
+                      <span style={{ fontWeight: 700 }}>{fmtMoney(d.value)}</span>
+                      {d.nights ? <span style={{ color: C.muted }}>{d.nights} nts</span> : null}
+                    </div>
+                    {d.arrival && <div className="ui" style={{ fontSize: 10.5, color: C.faint, marginTop: 3 }}>Arrives {d.arrival}</div>}
+                    <select value={d.stage} onChange={(e) => move(d, e.target.value)} className="ui" style={{ width: "100%", marginTop: 7, fontSize: 11, padding: "4px 6px", borderRadius: 6, border: `1px solid ${C.border}`, color: C.sub }}>
+                      {DEAL_STAGES.map((s) => <option key={s.id} value={s.id}>Move to: {s.label}</option>)}
+                    </select>
+                  </div>
+                ))}
+                {!col.length && <div className="ui" style={{ fontSize: 11, color: C.faint, textAlign: "center", padding: "10px 0" }}>—</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {!deals.length && <div className="ui" style={{ color: C.muted, fontSize: 13, textAlign: "center", marginTop: 20 }}>No deals yet. Click "New deal" to start tracking group & corporate leads.</div>}
+    </div>
+  );
+}
+const iconBtn = { background: "transparent", border: "none", cursor: "pointer", fontSize: 13, color: "#94a3b8", lineHeight: 1, padding: "0 2px" };
+function FunnelStat({ label, value, sub, good }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 16px" }}>
+      <div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .3, fontWeight: 700 }}>{label}</div>
+      <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700, marginTop: 6, color: good ? C.good : C.ink }}>{value}</div>
+      {sub && <div className="ui" style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+/* ---------------- SLACK DIGEST ---------------- */
+function SlackDigest({ model, propIds }) {
+  const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
+  const send = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const text = await callClaude({
+        system: "You write concise daily revenue digests for a hotel/STR ops team. Plain text, Slack-friendly, with a few bullet lines. No preamble.",
+        messages: [{ role: "user", content: `Write a short Slack digest for ${new Date().toDateString()} from this data:\n\n${snapshotForAI(model, propIds)}\n\nInclude: portfolio revenue on the books this month, the standout property, and one action. Keep under 120 words.` }],
+        max_tokens: 500,
+      });
+      const res = await fetch("/api/slack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || "Slack not configured"); }
+      setMsg({ ok: true, text: "Digest sent to Slack." });
+    } catch (e) { setMsg({ ok: false, text: e.message === "Slack not configured" ? "Add SLACK_WEBHOOK_URL in Vercel to enable this." : "Couldn't send — check the webhook setup." }); }
+    setBusy(false);
+  };
+  return (
+    <Panel title="Slack digest" right={<button className="ui" onClick={send} disabled={busy} style={btnSm}>{busy ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={13} />} Send now</button>}>
+      <div className="ui" style={{ fontSize: 13, color: C.sub }}>Push a one-tap summary of today's numbers to your team's Slack channel.</div>
+      {msg && <div className="ui" style={{ marginTop: 8, fontSize: 12.5, color: msg.ok ? C.good : C.bad }}>{msg.text}</div>}
+    </Panel>
   );
 }
 
