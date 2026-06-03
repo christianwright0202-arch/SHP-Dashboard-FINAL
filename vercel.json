@@ -1,0 +1,1 @@
+{ "functions": { "api/hostfully.js": { "maxDuration": 60 } } }
