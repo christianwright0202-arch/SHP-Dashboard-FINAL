@@ -2,8 +2,7 @@
 // Setup (Vercel -> Settings -> Environment Variables):
 //   HOSTFULLY_API_KEY    = key from Agency Settings
 //   HOSTFULLY_AGENCY_UID = agency UID (optional; auto-discovered if omitted)
-//
-// ?debug=1  -> shows raw lead + lead-detail shape (for mapping)
+// ?debug=1 -> shows raw shapes for mapping
 const BASE = "https://platform.hostfully.com/api/v3";
 
 async function hf(path, key) {
@@ -14,6 +13,21 @@ async function hf(path, key) {
   return json;
 }
 const arrOf = (o) => Array.isArray(o) ? o : (o && (o.leads || o.properties || o.agencies || o.data || o.results) || []);
+
+// Paginate until truly empty. Handles Hostfully's ~20/page cap and dedupes in case offset is ignored.
+async function pageAll(base, key, cap = 80) {
+  const seen = new Set(); const all = [];
+  for (let i = 0, offset = 0; i < cap; i++) {
+    const resp = await hf(`${base}${base.includes("?") ? "&" : "?"}limit=100&offset=${offset}`, key);
+    const arr = arrOf(resp); if (!arr.length) break;
+    let added = 0;
+    for (const it of arr) { const id = it.uid || JSON.stringify(it); if (!seen.has(id)) { seen.add(id); all.push(it); added++; } }
+    offset += arr.length;
+    if (added === 0) break;
+  }
+  return all;
+}
+
 const statusOf = (l) => String(l.status || l.leadStatus || "").toUpperCase();
 const isBooked = (l) => statusOf(l) === "BOOKED";
 const dateOf = (l, k) => { const v = l[k + "LocalDateTime"] || l[k + "ZonedDateTime"] || l[k + "Date"] || l[k]; return v ? String(v).slice(0, 10) : null; };
@@ -26,18 +40,16 @@ function channelOf(l) {
   if (s.includes("DIRECT") || s.includes("WEBSITE") || s.includes("MANUAL") || s.includes("DBS") || s.includes("WIDGET") || s === "HOSTFULLY") return "Direct";
   return "Other";
 }
-// search an object (incl. nested) for the booking total
 function moneyFrom(obj) {
   let best = 0;
-  const want = /(grand_?total|total_?amount|^total$|payout|subtotal|amount|balance|price)/i;
-  const skip = /count|score|id|night|guest|adult|child|pet|infant|tax|fee$|days|number/i;
+  const want = /(grand_?total|total_?amount|^total$|payout|subtotal|^amount$|balance|price)/i;
+  const skip = /count|score|night|guest|adult|child|pet|infant|tax|fee$|days|number|uid|id$/i;
   const walk = (o, depth) => {
     if (!o || typeof o !== "object" || depth > 4) return;
     for (const [k, v] of Object.entries(o)) {
       if (v && typeof v === "object") { walk(v, depth + 1); continue; }
       const n = Number(v);
       if (isFinite(n) && n > 0 && want.test(k) && !skip.test(k)) {
-        // prefer grand/total over generic
         const weight = /grand/i.test(k) ? 3 : /^total$|total_?amount/i.test(k) ? 2 : 1;
         if (weight >= 2 || n > best) best = Math.max(best, n);
       }
@@ -48,26 +60,20 @@ function moneyFrom(obj) {
 }
 
 export default async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
   const key = process.env.HOSTFULLY_API_KEY;
   const debug = (req.query && req.query.debug === "1") || (req.url || "").includes("debug=1");
   if (!key) return res.status(400).json({ error: "HOSTFULLY_API_KEY not set in Vercel" });
   try {
-    let agencyUid = process.env.HOSTFULLY_AGENCY_UID;
-    if (!agencyUid) { const ag = await hf("/agencies", key); agencyUid = (arrOf(ag)[0] || {}).uid; }
+    const agencies = await hf("/agencies", key).then(arrOf).catch(() => []);
+    let agencyUid = process.env.HOSTFULLY_AGENCY_UID || (agencies[0] || {}).uid;
 
-    const propsResp = await hf(`/properties?agencyUid=${agencyUid}&limit=200`, key);
-    const propList = arrOf(propsResp);
+    const propList = await pageAll(`/properties?agencyUid=${agencyUid}`, key);
     const nameByUid = {}; propList.forEach((p) => { nameByUid[p.uid] = p.name || p.title || ""; });
 
-    let leads = [], offset = 0;
-    for (let i = 0; i < 25; i++) {
-      const resp = await hf(`/leads?agencyUid=${agencyUid}&limit=100&offset=${offset}`, key);
-      const arr = arrOf(resp); if (!arr.length) break;
-      leads = leads.concat(arr); if (arr.length < 100) break; offset += 100;
-    }
+    const leads = await pageAll(`/leads?agencyUid=${agencyUid}`, key);
     const booked = leads.filter(isBooked);
 
-    // fetch detail for each booked lead (chunked) to get the dollar amount
     const detailFor = async (uid) => { try { return await hf(`/leads/${uid}`, key); } catch { return null; } };
     const details = [];
     for (let i = 0; i < booked.length; i += 8) {
@@ -77,25 +83,23 @@ export default async function handler(req, res) {
     }
 
     if (debug) {
-      const sampleBooked = booked[0] || null;
       const sampleDetail = details.find((d) => d.detail)?.detail || null;
       return res.status(200).json({
-        agencyUid, propertyCount: propList.length, propertyNames: Object.values(nameByUid),
+        agencyCount: agencies.length, agencyUids: agencies.map((a) => a.uid),
+        agencyUid, propertyCount: propList.length, propertyNames: propList.map((p) => p.name || p.title),
         rawLeadCount: leads.length, bookedCount: booked.length, statusesSeen: [...new Set(leads.map(statusOf))],
-        sampleBookedLead: sampleBooked,
         sampleBookedDetailKeys: sampleDetail ? Object.keys(sampleDetail) : null,
         sampleBookedDetail: sampleDetail,
         moneyExtractedFromDetail: sampleDetail ? moneyFrom(sampleDetail) : null,
-        moneyExtractedFromLead: sampleBooked ? moneyFrom(sampleBooked) : null,
       });
     }
 
-    const rows = details.map(({ lead, detail }) => {
-      const amount = moneyFrom(detail || {}) || moneyFrom(lead);
-      return { propertyName: nameByUid[lead.propertyUid] || "", checkIn: dateOf(lead, "checkIn"), checkOut: dateOf(lead, "checkOut"), amount, source: channelOf(lead) };
-    }).filter((r) => r.checkIn && r.amount > 0);
+    const rows = details.map(({ lead, detail }) => ({
+      propertyName: nameByUid[lead.propertyUid] || "", checkIn: dateOf(lead, "checkIn"), checkOut: dateOf(lead, "checkOut"),
+      amount: moneyFrom(detail || {}) || moneyFrom(lead), source: channelOf(lead),
+    })).filter((r) => r.checkIn && r.amount > 0);
 
-    return res.status(200).json({ ok: true, count: rows.length, bookedCount: booked.length, properties: Object.values(nameByUid), rows });
+    return res.status(200).json({ ok: true, count: rows.length, bookedCount: booked.length, propertyCount: propList.length, rows });
   } catch (e) {
     return res.status(500).json({ error: e.message, detail: e.detail });
   }
