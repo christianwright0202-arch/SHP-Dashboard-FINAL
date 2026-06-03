@@ -320,9 +320,32 @@ function ingestSheet(rows, ctx) {
 /* merge normalized records into the data model */
 function applyRecords(model, records) {
   const next = JSON.parse(JSON.stringify(model));
+
+  // PASS 1: figure out which buckets this batch will write, so a re-upload REPLACES rather than double-counts
+  const touch = {};
   for (const rec of records) {
     if (!rec.prop || rec.prop === "unknown") continue;
-    const p = (next.properties[rec.prop] = next.properties[rec.prop] || { monthly: {}, ota: {}, snapshot: null });
+    const t = (touch[rec.prop] = touch[rec.prop] || { months: new Set(), wcDates: new Set(), snapshot: false, pace: false });
+    if (rec.kind === "listingmonth") { t.months.add(rec.month); if (rec.monthLY) t.months.add(rec.monthLY); }
+    else if (rec.kind === "res" || rec.kind === "monthly") t.months.add(rec.month);
+    else if (rec.kind === "wc") t.wcDates.add(rec.date);
+    else if (rec.kind === "pace") t.pace = true;
+    else if (rec.kind === "snapshot" && (!rec.month || rec.month.endsWith("-00"))) t.snapshot = true;
+    else if (rec.kind === "monthly") t.months.add(rec.month);
+  }
+  for (const pid of Object.keys(touch)) {
+    const p = (next.properties[pid] = next.properties[pid] || { monthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
+    p.otaByMonth = p.otaByMonth || {};
+    for (const m of touch[pid].months) { delete p.monthly[m]; delete p.otaByMonth[m]; }
+    if (touch[pid].wcDates.size) { p.wc = p.wc || {}; for (const dte of touch[pid].wcDates) delete p.wc[dte]; }
+    if (touch[pid].pace) p.pace = null;
+    if (touch[pid].snapshot) p.snapshot = null;
+  }
+
+  // PASS 2: apply (accumulate within this single batch)
+  for (const rec of records) {
+    if (!rec.prop || rec.prop === "unknown") continue;
+    const p = (next.properties[rec.prop] = next.properties[rec.prop] || { monthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
 
     if (rec.kind === "wc") {
       const w = (p.wc = p.wc || {});
@@ -360,7 +383,6 @@ function applyRecords(model, records) {
       const cur = (p.monthly[rec.month] = p.monthly[rec.month] || { revenue: 0, nights: 0 });
       if (rec.kind === "res") {
         cur.revenue += rec.revenue; cur.nights += rec.nights || 0;
-        p.ota[rec.source] = (p.ota[rec.source] || 0) + rec.revenue;
         const obm = (p.otaByMonth = p.otaByMonth || {});
         const mo = (obm[rec.month] = obm[rec.month] || {});
         mo[rec.source] = (mo[rec.source] || 0) + rec.revenue;
@@ -372,6 +394,15 @@ function applyRecords(model, records) {
         if (rec.adr != null) cur.adr = rec.adr;
         if (rec.revenueLY != null) cur.revenueLY = rec.revenueLY;
       }
+    }
+  }
+
+  // PASS 3: rebuild each property's flat channel total from the monthly channel buckets (always idempotent)
+  for (const pid of Object.keys(next.properties)) {
+    const p = next.properties[pid];
+    if (p.otaByMonth) {
+      p.ota = {};
+      for (const m of Object.keys(p.otaByMonth)) for (const [src, v] of Object.entries(p.otaByMonth[m])) p.ota[src] = (p.ota[src] || 0) + v;
     }
   }
   next.lastUpdated = new Date().toISOString();
@@ -638,6 +669,30 @@ function Dashboard() {
 
   const onDrop = (e) => { e.preventDefault(); if (e.dataTransfer.files?.length) handleFiles([...e.dataTransfer.files]); };
 
+  const refreshHostfully = useCallback(async () => {
+    setBusy(true); setIngestMsg(null);
+    try {
+      const res = await fetch("/api/hostfully");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Hostfully request failed");
+      const records = [];
+      for (const r of data.rows || []) {
+        const prop = classifyListing(r.propertyName); if (!prop) continue;
+        const d = toDate(r.checkIn); if (!d) continue;
+        const out = r.checkOut ? toDate(r.checkOut) : null;
+        const nights = out ? Math.max(1, Math.round((out - d) / 86400000)) : 1;
+        records.push({ kind: "res", prop, month: mkey(d.getFullYear(), d.getMonth()), year: d.getFullYear(), mIdx: d.getMonth(), revenue: r.amount, nights, source: r.source });
+      }
+      if (!records.length) { setIngestMsg({ ok: false, text: `Hostfully connected (${data.count || 0} bookings) but none matched a property. Property names may need mapping — tell me what came back.` }); setBusy(false); return; }
+      const routed = {}; records.forEach((r) => { routed[r.prop] = (routed[r.prop] || 0) + 1; });
+      setModel((m) => { const after = applyRecords(m, records); after.activity = [{ ts: new Date().toISOString(), pid: null, text: `Synced ${records.length} bookings from Hostfully` }].concat(after.activity || []).slice(0, 40); return after; });
+      setIngestMsg({ ok: true, text: `Synced ${records.length} Hostfully bookings → ` + Object.keys(routed).map((id) => `${PROP_BY_ID[id]?.short} (${routed[id]})`).join(", ") });
+    } catch (e) {
+      setIngestMsg({ ok: false, text: e.message.includes("not set") ? "Add HOSTFULLY_API_KEY in Vercel to enable this." : `Hostfully sync failed: ${e.message}` });
+    }
+    setBusy(false);
+  }, []);
+
   const hasData = Object.keys(model.properties).length > 0;
 
   return (
@@ -701,6 +756,10 @@ function Dashboard() {
               {busy ? <Loader2 size={15} className="spin" style={{ animation: "spin 1s linear infinite" }} /> : <Upload size={15} />} Upload data
             </button>
             <span style={{ fontSize: 12, color: C.muted }}>.xlsx · .csv · .png · .jpg · .pdf — drag & drop anywhere</span>
+            <button className="navbtn" onClick={refreshHostfully} disabled={busy}
+              style={{ background: "#fff", color: C.slate, border: `1px solid ${C.borderStrong}`, borderRadius: 9, padding: "9px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+              <Activity size={15} /> Refresh from Hostfully
+            </button>
             <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 11, color: C.muted }}>Assign to:</span>
               <select value={propOverride} onChange={(e) => setPropOverride(e.target.value)}
