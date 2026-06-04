@@ -1,6 +1,9 @@
-// Hostfully sync. Cursor pagination + per-property orders matched to leads. ?debug=1 probes order endpoints.
-const VERSION = "sync-v8-2026-06-03";
+// Hostfully sync. Cursor pagination + per-lead orders (rent.netPrice), time-budgeted so it always returns.
+const VERSION = "sync-v9-2026-06-03";
 const BASE = "https://platform.hostfully.com/api/v3";
+const DEADLINE_MS = 52000;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64");
 
 async function hfRaw(path, key) {
   try {
@@ -9,13 +12,14 @@ async function hfRaw(path, key) {
     return { ok: r.ok, status: r.status, json: j };
   } catch (e) { return { ok: false, status: 0, json: { error: e.message } }; }
 }
-async function hf(path, key) { const r = await hfRaw(path, key); if (!r.ok) { const e = new Error(`${path} -> ${r.status}`); e.detail = r.json; throw e; } return r.json; }
+async function hf(path, key) { const r = await hfRaw(path, key); if (!r.ok) throw new Error(`${path} -> ${r.status}`); return r.json; }
 const arrOf = (o) => Array.isArray(o) ? o : (o && (o.leads || o.properties || o.agencies || o.orders || o.data || o.results) || []);
 const nextCursor = (r) => (r && r._paging && r._paging._nextCursor) || (r && r._metadata && r._metadata._nextCursor) || null;
 
-async function pageAll(base, key, cap = 80) {
+// sequential cursor pagination (proven reliable)
+async function pageAll(base, key, cap = 120) {
   const seen = new Set(), all = []; const sep = base.includes("?") ? "&" : "?";
-  const get = (cur, param) => hf(`${base}${sep}limit=100${cur ? `&${param}=${encodeURIComponent(cur)}` : ""}`, key);
+  const get = (cur, p) => hf(`${base}${sep}limit=100${cur ? `&${p}=${encodeURIComponent(cur)}` : ""}`, key);
   const eat = (arr) => { let a = 0; for (const it of arr) { const id = it.uid || JSON.stringify(it); if (!seen.has(id)) { seen.add(id); all.push(it); a++; } } return a; };
   let resp = await get(null, "cursor").catch(() => null); if (!resp) return all;
   eat(arrOf(resp)); let cur = nextCursor(resp), param = "cursor";
@@ -27,7 +31,6 @@ async function pageAll(base, key, cap = 80) {
   }
   return all;
 }
-async function inBatches(items, size, fn) { const out = []; for (let i = 0; i < items.length; i += size) { const r = await Promise.all(items.slice(i, i + size).map(fn)); out.push(...r); } return out; }
 
 const statusOf = (l) => String(l.status || l.leadStatus || "").toUpperCase();
 const isBooked = (l) => statusOf(l) === "BOOKED";
@@ -41,24 +44,21 @@ function channelOf(l) {
   if (s.includes("DIRECT") || s.includes("WEBSITE") || s.includes("MANUAL") || s.includes("DBS") || s.includes("WIDGET") || s === "HOSTFULLY") return "Direct";
   return "Other";
 }
-function moneyFrom(obj) {
-  let best = 0;
-  const want = /(grand_?total|total_?amount|^total$|payout|subtotal|^amount$|balance|^price$)/i;
-  const skip = /count|score|night|guest|adult|child|pet|infant|tax|fee$|days|number|uid|id$/i;
-  const walk = (o, d) => { if (!o || typeof o !== "object" || d > 6) return; for (const [k, v] of Object.entries(o)) { if (v && typeof v === "object") { walk(v, d + 1); continue; } const n = Number(v); if (isFinite(n) && n > 0 && want.test(k) && !skip.test(k)) best = Math.max(best, n); } };
-  walk(obj, 0); return best;
-}
-function leadUidIn(obj, set, depth = 0) {
-  if (!obj || typeof obj !== "object" || depth > 5) return null;
-  for (const v of Object.values(obj)) {
-    if (typeof v === "string" && set.has(v)) return v;
-    if (v && typeof v === "object") { const f = leadUidIn(v, set, depth + 1); if (f) return f; }
+const orderRent = (o) => Number(o && o.rent && o.rent.netPrice) || Number(o && o.totalAmount) || 0;
+
+async function leadMoney(uid, key) {
+  for (let t = 0; t < 2; t++) {
+    const r = await hfRaw(`/orders?leadUid=${uid}`, key);
+    if (r.ok) return arrOf(r.json).reduce((s, o) => s + orderRent(o), 0);
+    if (r.status === 429) { await sleep(450); continue; }
+    return 0;
   }
-  return null;
+  return 0;
 }
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store, max-age=0");
+  const start = Date.now();
   const key = process.env.HOSTFULLY_API_KEY;
   const debug = (req.query && req.query.debug === "1") || (req.url || "").includes("debug=1");
   if (!key) return res.status(400).json({ error: "HOSTFULLY_API_KEY not set in Vercel" });
@@ -68,30 +68,20 @@ export default async function handler(req, res) {
     const nameByUid = {}; propList.forEach((p) => { nameByUid[p.uid] = p.name || p.title || ""; });
     const leads = await pageAll(`/leads?agencyUid=${agencyUid}`, key);
     const booked = leads.filter(isBooked);
-    const bookedByUid = {}; booked.forEach((l) => { bookedByUid[l.uid] = l; });
-    const bookedSet = new Set(Object.keys(bookedByUid));
+    // most-recent first so a partial run still covers what matters
+    booked.sort((a, b) => (dateOf(b, "checkIn") || "").localeCompare(dateOf(a, "checkIn") || ""));
 
     if (debug) {
-      const pu = propList[0]?.uid, lu = booked[0]?.uid;
-      const byProp = pu ? arrOf(await hf(`/orders?propertyUid=${pu}&limit=100`, key).catch(() => null)) : [];
-      const byLead = lu ? arrOf(await hf(`/orders?leadUid=${lu}&limit=100`, key).catch(() => null)) : [];
-      const sample = byProp[0] || byLead[0] || null;
-      return res.status(200).json({
-        version: VERSION, propertyCount: propList.length, leadCount: leads.length, bookedCount: booked.length,
-        ordersByPropertyProbe: byProp.length, ordersByLeadProbe: byLead.length,
-        sampleOrderMoney: sample ? moneyFrom(sample) : 0,
-        sampleOrderHasLeadRef: sample ? !!leadUidIn(sample, bookedSet) : false,
-        sampleOrder: sample,
-      });
+      const sampleMoney = booked.length ? await leadMoney(booked[0].uid, key) : 0;
+      return res.status(200).json({ version: VERSION, propertyCount: propList.length, leadCount: leads.length, bookedCount: booked.length, sampleLeadMoney: sampleMoney, elapsedMs: Date.now() - start });
     }
 
-    // pull orders per property (efficient), match to booked leads
-    const orderLists = await inBatches(propList.map((p) => p.uid), 8, (pu) => pageAll(`/orders?propertyUid=${pu}`, key).catch(() => []));
-    const orders = orderLists.flat();
-    const moneyByLead = {};
-    for (const ord of orders) {
-      const lu = ord.leadUid || (ord.lead && ord.lead.uid) || leadUidIn(ord, bookedSet);
-      if (lu && bookedSet.has(lu)) moneyByLead[lu] = (moneyByLead[lu] || 0) + moneyFrom(ord);
+    const moneyByLead = {}; let partial = false;
+    for (let i = 0; i < booked.length; i += 25) {
+      if (Date.now() - start > DEADLINE_MS) { partial = true; break; }
+      const chunk = booked.slice(i, i + 25);
+      const amts = await Promise.all(chunk.map((l) => leadMoney(l.uid, key)));
+      chunk.forEach((l, j) => { if (amts[j] > 0) moneyByLead[l.uid] = amts[j]; });
     }
 
     const rows = booked.map((l) => ({
@@ -99,8 +89,8 @@ export default async function handler(req, res) {
       amount: moneyByLead[l.uid] || 0, source: channelOf(l),
     })).filter((r) => r.checkIn && r.amount > 0);
 
-    return res.status(200).json({ version: VERSION, ok: true, count: rows.length, bookedCount: booked.length, propertyCount: propList.length, orderCount: orders.length, matched: Object.keys(moneyByLead).length, rows });
+    return res.status(200).json({ version: VERSION, ok: true, count: rows.length, bookedCount: booked.length, matched: Object.keys(moneyByLead).length, partial, propertyCount: propList.length, elapsedMs: Date.now() - start, rows });
   } catch (e) {
-    return res.status(500).json({ error: e.message, detail: e.detail });
+    return res.status(500).json({ error: e.message });
   }
 }
