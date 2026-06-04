@@ -1,5 +1,5 @@
-// Hostfully sync. Cursor pagination + per-lead orders (rent.netPrice), time-budgeted so it always returns.
-const VERSION = "sync-v9-2026-06-03";
+// Hostfully sync. Parallel cursor pagination + per-lead orders (rent.netPrice), time-budgeted.
+const VERSION = "sync-v10-2026-06-03";
 const BASE = "https://platform.hostfully.com/api/v3";
 const DEADLINE_MS = 52000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -8,7 +8,7 @@ const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64");
 async function hfRaw(path, key) {
   try {
     const r = await fetch(BASE + path, { headers: { "X-HOSTFULLY-APIKEY": key, "Content-Type": "application/json" } });
-    const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = { _raw: t.slice(0, 300) }; }
+    const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = { _raw: t.slice(0, 200) }; }
     return { ok: r.ok, status: r.status, json: j };
   } catch (e) { return { ok: false, status: 0, json: { error: e.message } }; }
 }
@@ -16,18 +16,32 @@ async function hf(path, key) { const r = await hfRaw(path, key); if (!r.ok) thro
 const arrOf = (o) => Array.isArray(o) ? o : (o && (o.leads || o.properties || o.agencies || o.orders || o.data || o.results) || []);
 const nextCursor = (r) => (r && r._paging && r._paging._nextCursor) || (r && r._metadata && r._metadata._nextCursor) || null;
 
-// sequential cursor pagination (proven reliable)
-async function pageAll(base, key, cap = 120) {
+// sequential fallback
+async function pageSeq(base, key, cap = 150) {
   const seen = new Set(), all = []; const sep = base.includes("?") ? "&" : "?";
   const get = (cur, p) => hf(`${base}${sep}limit=100${cur ? `&${p}=${encodeURIComponent(cur)}` : ""}`, key);
   const eat = (arr) => { let a = 0; for (const it of arr) { const id = it.uid || JSON.stringify(it); if (!seen.has(id)) { seen.add(id); all.push(it); a++; } } return a; };
   let resp = await get(null, "cursor").catch(() => null); if (!resp) return all;
   eat(arrOf(resp)); let cur = nextCursor(resp), param = "cursor";
-  if (cur) {
-    let r2 = await get(cur, "cursor").catch(() => null); let added = r2 ? eat(arrOf(r2)) : 0;
-    if (added === 0) { r2 = await get(cur, "_cursor").catch(() => null); added = r2 ? eat(arrOf(r2)) : 0; if (added > 0) param = "_cursor"; }
-    cur = added > 0 ? nextCursor(r2) : null;
-    for (let i = 0; i < cap && cur; i++) { const r = await get(cur, param).catch(() => null); if (!r) break; const a = eat(arrOf(r)); cur = nextCursor(r); if (!a || !cur) break; }
+  if (cur) { let r2 = await get(cur, "cursor").catch(() => null); let added = r2 ? eat(arrOf(r2)) : 0; if (added === 0) { r2 = await get(cur, "_cursor").catch(() => null); added = r2 ? eat(arrOf(r2)) : 0; if (added > 0) param = "_cursor"; } cur = added > 0 ? nextCursor(r2) : null; for (let i = 0; i < cap && cur; i++) { const r = await get(cur, param).catch(() => null); if (!r) break; const a = eat(arrOf(r)); cur = nextCursor(r); if (!a || !cur) break; } }
+  return all;
+}
+// fast parallel pagination using self-generated offset cursors; falls back to sequential if that fails
+async function pageAll(base, key) {
+  const sep = base.includes("?") ? "&" : "?";
+  const seen = new Set(), all = [];
+  const eat = (arr) => { let a = 0; for (const it of arr) { const id = it.uid || JSON.stringify(it); if (!seen.has(id)) { seen.add(id); all.push(it); a++; } } return a; };
+  const first = await hf(`${base}${sep}limit=100`, key).catch(() => null); if (!first) return all;
+  const fArr = arrOf(first); eat(fArr); const size = fArr.length || 20;
+  if (fArr.length < size) return all;
+  const probe = await hf(`${base}${sep}limit=100&cursor=${encodeURIComponent(b64({ offset: size }))}`, key).catch(() => null);
+  if (!probe || eat(arrOf(probe)) === 0) return pageSeq(base, key);
+  let offset = size * 2;
+  for (let w = 0; w < 200; w++) {
+    const offs = []; for (let k = 0; k < 25; k++) { offs.push(offset); offset += size; }
+    const resps = await Promise.all(offs.map((o) => hf(`${base}${sep}limit=100&cursor=${encodeURIComponent(b64({ offset: o }))}`, key).catch(() => null)));
+    let added = 0, empty = false; for (const r of resps) { const a = arrOf(r); if (!a.length) empty = true; added += eat(a); }
+    if (empty || added === 0) break;
   }
   return all;
 }
@@ -45,7 +59,6 @@ function channelOf(l) {
   return "Other";
 }
 const orderRent = (o) => Number(o && o.rent && o.rent.netPrice) || Number(o && o.totalAmount) || 0;
-
 async function leadMoney(uid, key) {
   for (let t = 0; t < 2; t++) {
     const r = await hfRaw(`/orders?leadUid=${uid}`, key);
@@ -68,7 +81,6 @@ export default async function handler(req, res) {
     const nameByUid = {}; propList.forEach((p) => { nameByUid[p.uid] = p.name || p.title || ""; });
     const leads = await pageAll(`/leads?agencyUid=${agencyUid}`, key);
     const booked = leads.filter(isBooked);
-    // most-recent first so a partial run still covers what matters
     booked.sort((a, b) => (dateOf(b, "checkIn") || "").localeCompare(dateOf(a, "checkIn") || ""));
 
     if (debug) {
@@ -83,12 +95,7 @@ export default async function handler(req, res) {
       const amts = await Promise.all(chunk.map((l) => leadMoney(l.uid, key)));
       chunk.forEach((l, j) => { if (amts[j] > 0) moneyByLead[l.uid] = amts[j]; });
     }
-
-    const rows = booked.map((l) => ({
-      propertyName: nameByUid[l.propertyUid] || "", checkIn: dateOf(l, "checkIn"), checkOut: dateOf(l, "checkOut"),
-      amount: moneyByLead[l.uid] || 0, source: channelOf(l),
-    })).filter((r) => r.checkIn && r.amount > 0);
-
+    const rows = booked.map((l) => ({ propertyName: nameByUid[l.propertyUid] || "", checkIn: dateOf(l, "checkIn"), checkOut: dateOf(l, "checkOut"), amount: moneyByLead[l.uid] || 0, source: channelOf(l) })).filter((r) => r.checkIn && r.amount > 0);
     return res.status(200).json({ version: VERSION, ok: true, count: rows.length, bookedCount: booked.length, matched: Object.keys(moneyByLead).length, partial, propertyCount: propList.length, elapsedMs: Date.now() - start, rows });
   } catch (e) {
     return res.status(500).json({ error: e.message });
