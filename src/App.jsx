@@ -109,9 +109,9 @@ function sourceLabel(raw) {
   const n = norm(raw);
   if (n.includes("airbnb")) return "Airbnb";
   if (n.includes("vrbo") || n.includes("homeaway")) return "Vrbo";
-  if (n.includes("booking")) return "Booking.com";
   if (n.includes("expedia")) return "Expedia";
-  if (n.includes("direct") || n.includes("website") || n.includes("hostfully") || n.includes("cloudbeds")) return "Direct";
+  if (n.includes("website") || n.includes("engine") || n.includes("walk") || n.includes("direct") || n.includes("hostfully") || n.includes("cloudbeds") || n.includes("manual")) return "Direct";
+  if (n.includes("booking")) return "Booking.com";
   return "Other";
 }
 function toDate(v) {
@@ -186,6 +186,45 @@ function ingestSheet(rows, ctx) {
       out.push({ kind: "wc", prop, date: isoDate(d), units, booked: occ * units, revenue: num(r[cRev]) || 0 });
     }
     return out;
+  }
+
+  // 0b) CLOUDBEDS-STYLE CHANNEL PRODUCTION (stacked header, leading blank col, merged month cells)
+  {
+    const N = rows.map((r) => (r || []).map(norm));
+    const stayRow = N.findIndex((r) => r.some((c) => c.includes("stay date")));
+    const hasResSrcAnywhere = N.some((r) => r.some((c) => c.includes("reservation source")));
+    if (stayRow >= 0 && hasResSrcAnywhere) {
+      const hrow = N[stayRow];
+      const cStay = hrow.findIndex((c) => c.includes("stay date"));
+      const cCat = hrow.findIndex((c) => c.includes("source category"));
+      const cSrc = hrow.findIndex((c, i) => c.includes("reservation source") && !c.includes("category") && i !== cCat);
+      // "This year" Rooms Sold / Total Room Revenue = leftmost exact matches across the header rows
+      let cRooms = -1, cRev = -1;
+      for (let i = 0; i <= stayRow && i < N.length; i++) {
+        if (cRooms < 0) { const j = N[i].indexOf("rooms sold"); if (j >= 0) cRooms = j; }
+        if (cRev < 0) { const j = N[i].findIndex((c) => c === "total room revenue" || c === "room revenue"); if (j >= 0) cRev = j; }
+      }
+      if (cStay >= 0 && cSrc >= 0 && cRev >= 0) {
+        // property name from a "Property" label row, else filename
+        let propName = "";
+        for (const r of rows) { const arr = r || []; const j = arr.findIndex((c) => norm(c) === "property"); if (j >= 0) { for (let k = j + 1; k < arr.length; k++) { if (String(arr[k] ?? "").trim()) { propName = String(arr[k]).trim(); break; } } if (propName) break; } }
+        const prop = ctx.propOverride || classifyListing(propName) || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename) || "unknown";
+        const yr = new Date().getFullYear();
+        let curMonth = null;
+        for (let i = stayRow + 1; i < rows.length; i++) {
+          const r = rows[i]; if (!r) continue;
+          const mlabel = norm(r[cStay]).slice(0, 3);
+          if (MONTH_IDX[mlabel] != null) curMonth = MONTH_IDX[mlabel]; // carry forward merged month
+          if (curMonth == null) continue;
+          const srcRaw = r[cSrc]; const sn = norm(srcRaw);
+          if (!sn || sn === "-") continue; // subtotal / empty row
+          const rev = num(r[cRev]); if (rev == null) continue;
+          const rooms = cRooms >= 0 ? (num(r[cRooms]) || 0) : 0;
+          out.push({ kind: "res", prop, month: mkey(yr, curMonth), year: yr, mIdx: curMonth, revenue: rev, nights: rooms, source: sourceLabel(srcRaw) });
+        }
+        if (out.length) return out;
+      }
+    }
   }
 
   // detect format
