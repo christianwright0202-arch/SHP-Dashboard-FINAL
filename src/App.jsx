@@ -615,6 +615,7 @@ function Dashboard() {
   const [loaded, setLoaded] = useState(false);
   const [page, setPage] = useState("overview");
   const [ingestMsg, setIngestMsg] = useState(null);
+  const [hfDebug, setHfDebug] = useState(null);
   const [busy, setBusy] = useState(false);
   const [propOverride, setPropOverride] = useState("auto");
   const fileRef = useRef(null);
@@ -669,12 +670,23 @@ function Dashboard() {
 
   const onDrop = (e) => { e.preventDefault(); if (e.dataTransfer.files?.length) handleFiles([...e.dataTransfer.files]); };
 
+  const runHfDebug = useCallback(async () => {
+    setBusy(true);
+    try { const dr = await fetch("/api/hostfully?debug=1"); const dj = await dr.json(); setHfDebug(JSON.stringify(dj, null, 2)); }
+    catch (e) { setHfDebug("Could not reach the diagnostics endpoint: " + e.message); }
+    setBusy(false);
+  }, []);
+
   const refreshHostfully = useCallback(async () => {
-    setBusy(true); setIngestMsg(null);
+    setBusy(true); setIngestMsg(null); setHfDebug(null);
+    const showDebug = async (note) => {
+      try { const dr = await fetch("/api/hostfully?debug=1"); const dj = await dr.json(); setHfDebug(JSON.stringify(dj, null, 2)); } catch (e) {}
+      setIngestMsg({ ok: false, text: note });
+    };
     try {
       const res = await fetch("/api/hostfully");
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Hostfully request failed");
+      if (!res.ok) { await showDebug(data.error || "Hostfully request failed — diagnostic shown below."); setBusy(false); return; }
       const records = [];
       for (const r of data.rows || []) {
         const prop = classifyListing(r.propertyName); if (!prop) continue;
@@ -683,12 +695,12 @@ function Dashboard() {
         const nights = out ? Math.max(1, Math.round((out - d) / 86400000)) : 1;
         records.push({ kind: "res", prop, month: mkey(d.getFullYear(), d.getMonth()), year: d.getFullYear(), mIdx: d.getMonth(), revenue: r.amount, nights, source: r.source });
       }
-      if (!records.length) { setIngestMsg({ ok: false, text: `Hostfully connected (${data.count || 0} bookings) but none matched a property. Property names may need mapping — tell me what came back.` }); setBusy(false); return; }
+      if (!records.length) { await showDebug(`Hostfully connected (${data.bookedCount || 0} bookings, ${data.count || 0} with revenue) but none mapped to a property. Diagnostic shown below.`); setBusy(false); return; }
       const routed = {}; records.forEach((r) => { routed[r.prop] = (routed[r.prop] || 0) + 1; });
       setModel((m) => { const after = applyRecords(m, records); after.activity = [{ ts: new Date().toISOString(), pid: null, text: `Synced ${records.length} bookings from Hostfully` }].concat(after.activity || []).slice(0, 40); return after; });
       setIngestMsg({ ok: true, text: `Synced ${records.length} Hostfully bookings → ` + Object.keys(routed).map((id) => `${PROP_BY_ID[id]?.short} (${routed[id]})`).join(", ") });
     } catch (e) {
-      setIngestMsg({ ok: false, text: e.message.includes("not set") ? "Add HOSTFULLY_API_KEY in Vercel to enable this." : `Hostfully sync failed: ${e.message}` });
+      await showDebug(e.message.includes("not set") ? "Add HOSTFULLY_API_KEY in Vercel to enable this." : `Hostfully sync failed: ${e.message}`);
     }
     setBusy(false);
   }, []);
@@ -760,6 +772,10 @@ function Dashboard() {
               style={{ background: "#fff", color: C.slate, border: `1px solid ${C.borderStrong}`, borderRadius: 9, padding: "9px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
               <Activity size={15} /> Refresh from Hostfully
             </button>
+            <button className="navbtn" onClick={runHfDebug} disabled={busy} title="Run Hostfully diagnostics in-app"
+              style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 9, padding: "9px 12px", fontSize: 12.5, cursor: "pointer" }}>
+              Diagnostics
+            </button>
             <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 11, color: C.muted }}>Assign to:</span>
               <select value={propOverride} onChange={(e) => setPropOverride(e.target.value)}
@@ -775,6 +791,17 @@ function Dashboard() {
             <div className="ui" style={{ margin: "12px 28px 0", padding: "10px 14px", borderRadius: 9, fontSize: 13, background: ingestMsg.ok ? "#eaf6ef" : "#fdeeee", color: ingestMsg.ok ? C.good : C.bad, border: `1px solid ${ingestMsg.ok ? "#cfe9da" : "#f2cccc"}`, display: "flex", justifyContent: "space-between" }}>
               <span>{ingestMsg.text}</span>
               <X size={15} style={{ cursor: "pointer" }} onClick={() => setIngestMsg(null)} />
+            </div>
+          )}
+
+          {hfDebug && (
+            <div className="ui" style={{ margin: "12px 28px 0", padding: "12px 14px", borderRadius: 9, background: "#0f1b2d", border: "1px solid #243244" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                <span style={{ color: "#9fb0c6", fontSize: 12, fontWeight: 700, letterSpacing: .5, textTransform: "uppercase" }}>Hostfully diagnostics</span>
+                <button onClick={() => navigator.clipboard?.writeText(hfDebug)} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid #34465c", background: "#1b2a3f", color: "#cfe0f0", cursor: "pointer" }}>Copy</button>
+                <X size={15} style={{ cursor: "pointer", color: "#9fb0c6", marginLeft: "auto" }} onClick={() => setHfDebug(null)} />
+              </div>
+              <pre style={{ margin: 0, maxHeight: 280, overflow: "auto", fontSize: 11.5, lineHeight: 1.5, color: "#cfe0f0", fontFamily: "ui-monospace, Menlo, monospace", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{hfDebug}</pre>
             </div>
           )}
 
