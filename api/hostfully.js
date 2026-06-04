@@ -1,5 +1,5 @@
-// Hostfully sync. Cursor pagination + bulk orders (matched to leads). ?debug=1 dumps a sample order.
-const VERSION = "sync-v7-2026-06-03";
+// Hostfully sync. Cursor pagination + per-property orders matched to leads. ?debug=1 probes order endpoints.
+const VERSION = "sync-v8-2026-06-03";
 const BASE = "https://platform.hostfully.com/api/v3";
 
 async function hfRaw(path, key) {
@@ -13,7 +13,7 @@ async function hf(path, key) { const r = await hfRaw(path, key); if (!r.ok) { co
 const arrOf = (o) => Array.isArray(o) ? o : (o && (o.leads || o.properties || o.agencies || o.orders || o.data || o.results) || []);
 const nextCursor = (r) => (r && r._paging && r._paging._nextCursor) || (r && r._metadata && r._metadata._nextCursor) || null;
 
-async function pageAll(base, key, cap = 60) {
+async function pageAll(base, key, cap = 80) {
   const seen = new Set(), all = []; const sep = base.includes("?") ? "&" : "?";
   const get = (cur, param) => hf(`${base}${sep}limit=100${cur ? `&${param}=${encodeURIComponent(cur)}` : ""}`, key);
   const eat = (arr) => { let a = 0; for (const it of arr) { const id = it.uid || JSON.stringify(it); if (!seen.has(id)) { seen.add(id); all.push(it); a++; } } return a; };
@@ -27,6 +27,7 @@ async function pageAll(base, key, cap = 60) {
   }
   return all;
 }
+async function inBatches(items, size, fn) { const out = []; for (let i = 0; i < items.length; i += size) { const r = await Promise.all(items.slice(i, i + size).map(fn)); out.push(...r); } return out; }
 
 const statusOf = (l) => String(l.status || l.leadStatus || "").toUpperCase();
 const isBooked = (l) => statusOf(l) === "BOOKED";
@@ -47,7 +48,6 @@ function moneyFrom(obj) {
   const walk = (o, d) => { if (!o || typeof o !== "object" || d > 6) return; for (const [k, v] of Object.entries(o)) { if (v && typeof v === "object") { walk(v, d + 1); continue; } const n = Number(v); if (isFinite(n) && n > 0 && want.test(k) && !skip.test(k)) best = Math.max(best, n); } };
   walk(obj, 0); return best;
 }
-// find a uid string anywhere in the object that belongs to a known lead
 function leadUidIn(obj, set, depth = 0) {
   if (!obj || typeof obj !== "object" || depth > 5) return null;
   for (const v of Object.values(obj)) {
@@ -71,23 +71,27 @@ export default async function handler(req, res) {
     const bookedByUid = {}; booked.forEach((l) => { bookedByUid[l.uid] = l; });
     const bookedSet = new Set(Object.keys(bookedByUid));
 
-    // bulk orders, matched to leads by uid
-    const orders = await pageAll(`/orders?agencyUid=${agencyUid}`, key);
+    if (debug) {
+      const pu = propList[0]?.uid, lu = booked[0]?.uid;
+      const byProp = pu ? arrOf(await hf(`/orders?propertyUid=${pu}&limit=100`, key).catch(() => null)) : [];
+      const byLead = lu ? arrOf(await hf(`/orders?leadUid=${lu}&limit=100`, key).catch(() => null)) : [];
+      const sample = byProp[0] || byLead[0] || null;
+      return res.status(200).json({
+        version: VERSION, propertyCount: propList.length, leadCount: leads.length, bookedCount: booked.length,
+        ordersByPropertyProbe: byProp.length, ordersByLeadProbe: byLead.length,
+        sampleOrderMoney: sample ? moneyFrom(sample) : 0,
+        sampleOrderHasLeadRef: sample ? !!leadUidIn(sample, bookedSet) : false,
+        sampleOrder: sample,
+      });
+    }
+
+    // pull orders per property (efficient), match to booked leads
+    const orderLists = await inBatches(propList.map((p) => p.uid), 8, (pu) => pageAll(`/orders?propertyUid=${pu}`, key).catch(() => []));
+    const orders = orderLists.flat();
     const moneyByLead = {};
     for (const ord of orders) {
       const lu = ord.leadUid || (ord.lead && ord.lead.uid) || leadUidIn(ord, bookedSet);
       if (lu && bookedSet.has(lu)) moneyByLead[lu] = (moneyByLead[lu] || 0) + moneyFrom(ord);
-    }
-
-    if (debug) {
-      return res.status(200).json({
-        version: VERSION, agencyUid,
-        propertyCount: propList.length, propertyNames: propList.map((p) => p.name || p.title),
-        leadCount: leads.length, bookedCount: booked.length,
-        orderCount: orders.length, ordersMatchedToBookings: Object.keys(moneyByLead).length,
-        sampleOrder: orders[0] || null,
-        sampleMatchedMoney: Object.values(moneyByLead)[0] || 0,
-      });
     }
 
     const rows = booked.map((l) => ({
@@ -95,7 +99,7 @@ export default async function handler(req, res) {
       amount: moneyByLead[l.uid] || 0, source: channelOf(l),
     })).filter((r) => r.checkIn && r.amount > 0);
 
-    return res.status(200).json({ version: VERSION, ok: true, count: rows.length, bookedCount: booked.length, propertyCount: propList.length, orderCount: orders.length, rows });
+    return res.status(200).json({ version: VERSION, ok: true, count: rows.length, bookedCount: booked.length, propertyCount: propList.length, orderCount: orders.length, matched: Object.keys(moneyByLead).length, rows });
   } catch (e) {
     return res.status(500).json({ error: e.message, detail: e.detail });
   }
