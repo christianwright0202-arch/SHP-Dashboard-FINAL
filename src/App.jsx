@@ -1607,6 +1607,16 @@ function AuditPage({ model, setModel }) {
   const derived = useMemo(() => PROPERTIES.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model]);
   const year = new Date().getFullYear();
 
+  const clearProp = (pid) => {
+    if (!window.confirm(`Delete ALL stored data for ${PROP_BY_ID[pid]?.name}? The months stay listed so you can re-upload files or type correct numbers in.`)) return;
+    setModel((m) => {
+      const next = JSON.parse(JSON.stringify(m));
+      next.properties[pid] = { monthly: {}, ota: {}, otaByMonth: {}, snapshot: null, pace: null, wc: {} };
+      next.lastUpdated = new Date().toISOString();
+      return next;
+    });
+  };
+
   const setCell = (pid, monthKey, field, raw) => {
     setModel((m) => {
       const next = JSON.parse(JSON.stringify(m));
@@ -1650,6 +1660,11 @@ function AuditPage({ model, setModel }) {
             </div>
             {isOpen && (
               <div style={{ padding: "0 18px 18px" }}>
+                <div className="ui" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+                  <button onClick={() => clearProp(d.pid)} style={{ fontSize: 12, padding: "6px 12px", borderRadius: 7, border: "1px solid #f2cccc", background: "#fdf3f3", color: C.bad, cursor: "pointer", fontWeight: 600 }}>
+                    Clear all data for this property
+                  </button>
+                </div>
                 <div style={{ overflowX: "auto" }}>
                   <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                     <thead>
