@@ -812,7 +812,7 @@ function Dashboard() {
                 : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={model} goto={setPage} />
                 : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
                   : page === "ask" ? <AskPage model={model} />
-                    : page === "audit" ? <AuditPage model={model} />
+                    : page === "audit" ? <AuditPage model={model} setModel={setModel} />
                     : page === "sales" ? <SalesPipeline model={model} setModel={setModel} />
                     : <PropertyPage pid={page} model={model} setModel={setModel} />}
           </div>
@@ -1563,37 +1563,50 @@ function Events({ model, setModel, onFiles }) {
 const btnSm = { background: "#243244", color: "#fff", border: "none", borderRadius: 8, padding: "7px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 };
 
 /* ---------------- DATA AUDIT ---------------- */
-function AuditPage({ model }) {
+function AuditPage({ model, setModel }) {
   const [openProp, setOpenProp] = useState(null);
   const derived = useMemo(() => PROPERTIES.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model]);
+  const year = new Date().getFullYear();
+
+  const setCell = (pid, monthKey, field, raw) => {
+    setModel((m) => {
+      const next = JSON.parse(JSON.stringify(m));
+      const p = (next.properties[pid] = next.properties[pid] || { monthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
+      const cur = (p.monthly[monthKey] = p.monthly[monthKey] || { revenue: 0, nights: 0 });
+      const [y, mo] = monthKey.split("-").map(Number);
+      const days = daysInMonth(y, mo - 1); const units = PROP_BY_ID[pid].units;
+      const val = raw === "" ? null : Number(String(raw).replace(/[$,%\s]/g, ""));
+      if (field === "revenue") { cur.revenue = val || 0; delete cur.adr; delete cur.revpar; }
+      if (field === "occ") { const occ = val == null ? null : (val > 1.5 ? val / 100 : val); cur.occ = occ; cur.nights = occ != null ? Math.round(occ * units * days) : 0; delete cur.adr; delete cur.revpar; }
+      next.lastUpdated = new Date().toISOString();
+      return next;
+    });
+  };
 
   if (!derived.length) {
-    return (<><SectionTitle sub="See exactly how every number is calculated">Data Audit</SectionTitle><Panel title="No data"><Empty text="Upload data first, then come back to inspect how each figure is computed." /></Panel></>);
+    return (<><SectionTitle sub="Inspect and edit every number">Data Audit</SectionTitle><Panel title="No data"><Empty text="Upload data first (or just open a property below and type the numbers in)." /></Panel></>);
   }
 
   return (
     <div>
-      <SectionTitle sub="Trace every KPI back to its raw inputs and formula — nothing is a black box">Data Audit</SectionTitle>
+      <SectionTitle sub="Trace every KPI to its inputs — and edit any number directly">Data Audit</SectionTitle>
 
-      <Panel title="How each metric is calculated" style={{ marginBottom: 16 }}>
-        <div className="ui" style={{ fontSize: 13.5, lineHeight: 1.8, color: C.sub }}>
-          <div><b>Revenue</b> = sum of accommodation revenue from your uploaded files for that month (taxes/fees excluded if your export excludes them).</div>
-          <div><b>Occupancy</b> = nights sold ÷ available nights, where available nights = (units × days in month). If your file already states occupancy, that value is used directly.</div>
-          <div><b>ADR</b> (Average Daily Rate) = revenue ÷ nights sold. If your file states ADR, that is used directly.</div>
-          <div><b>RevPAR</b> (Revenue Per Available Room) = ADR × Occupancy. If your file states RevPAR, that is used directly.</div>
-          <div><b>Channel mix</b> = revenue grouped by the booking source column in reservation-level files.</div>
-          <div style={{ marginTop: 8, color: C.muted, fontSize: 12.5 }}>Unit counts used: {PROPERTIES.map((p) => `${p.short} ${p.units}`).join(" · ")}. A value shown in <span style={{ color: C.good, fontWeight: 600 }}>green “from file”</span> came straight from your upload; <span style={{ color: "#b7791f", fontWeight: 600 }}>amber “computed”</span> was derived by the formula above.</div>
+      <Panel title="Edit mode" style={{ marginBottom: 16 }}>
+        <div className="ui" style={{ fontSize: 13.5, lineHeight: 1.7, color: C.sub }}>
+          Type a new <b>Revenue</b> or <b>Occupancy %</b> in any cell below and press Enter (or click away) — it saves instantly and recalculates ADR, RevPAR, goals, forecasts, and the charts everywhere. Use this to correct a wrong figure or fill in a month before presenting. ADR and RevPAR are computed for you. All 12 months of {year} are listed for each property so you can fill any gap.
         </div>
       </Panel>
 
       {derived.map((d) => {
         const isOpen = openProp === d.pid;
+        const existing = d.series.map((s) => s.key);
+        const monthKeys = [...new Set([...existing, ...Array.from({ length: 12 }, (_, i) => mkey(year, i))])].sort();
         return (
           <div key={d.pid} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, marginBottom: 12, borderLeft: `4px solid ${d.meta.color}`, overflow: "hidden" }}>
             <div className="ui" onClick={() => setOpenProp(isOpen ? null : d.pid)} style={{ cursor: "pointer", padding: "14px 18px", display: "flex", alignItems: "center", gap: 10 }}>
               <span style={{ width: 11, height: 11, borderRadius: 11, background: d.meta.color }} />
               <span style={{ fontWeight: 700, color: C.ink }}>{d.meta.name}</span>
-              <span style={{ fontSize: 12.5, color: C.muted }}>· {d.meta.units} units · {d.series.length} month(s) of data{d.raw?.snapshot ? " + annual snapshot" : ""}</span>
+              <span style={{ fontSize: 12.5, color: C.muted }}>· {d.meta.units} units · {year} YTD {fmtMoney(d.ytd)}</span>
               <ChevronRight size={17} style={{ marginLeft: "auto", color: C.faint, transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
             </div>
             {isOpen && (
@@ -1602,26 +1615,29 @@ function AuditPage({ model }) {
                   <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                     <thead>
                       <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: .4 }}>
-                        {["Month", "Revenue (input)", "Nights sold", "Available (units×days)", "Occupancy", "ADR", "RevPAR"].map((h) => (
+                        {["Month", "Revenue (edit)", "Occupancy % (edit)", "Nights", "ADR", "RevPAR"].map((h) => (
                           <th key={h} style={{ padding: "8px 10px", borderBottom: `2px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {d.series.map((s) => {
-                        const days = daysInMonth(s.year, s.mIdx);
-                        const avail = d.meta.units * days;
-                        const dd = d.raw.monthly[s.key] || {};
-                        const occFromFile = dd.occ != null, adrFromFile = dd.adr != null, revparFromFile = dd.revpar != null;
+                      {monthKeys.map((key) => {
+                        const [y, mo] = key.split("-").map(Number);
+                        const days = daysInMonth(y, mo - 1); const avail = d.meta.units * days;
+                        const dd = d.raw.monthly[key] || {};
+                        const rev = dd.revenue || 0;
+                        const occ = dd.occ != null ? dd.occ : (dd.nights ? Math.min(1, dd.nights / avail) : null);
+                        const nights = dd.nights != null ? dd.nights : (occ != null ? Math.round(occ * avail) : null);
+                        const adr = dd.adr != null ? dd.adr : (nights ? rev / nights : null);
+                        const revpar = dd.revpar != null ? dd.revpar : (avail ? rev / avail : null);
                         return (
-                          <tr key={s.key} style={{ borderBottom: `1px solid ${C.track}` }}>
-                            <td style={{ padding: "8px 10px", fontWeight: 600 }}>{s.label}</td>
-                            <td style={{ padding: "8px 10px" }}>{fmtMoney(s.revenue)}</td>
-                            <td style={{ padding: "8px 10px" }}>{s.nights != null ? s.nights : "—"}</td>
-                            <td style={{ padding: "8px 10px", color: C.muted }}>{d.meta.units} × {days} = {avail}</td>
-                            <AuditCell value={fmtPct(s.occ)} fromFile={occFromFile} />
-                            <AuditCell value={fmtMoney(s.adr)} fromFile={adrFromFile} />
-                            <AuditCell value={fmtMoney(s.revpar)} fromFile={revparFromFile} />
+                          <tr key={key} style={{ borderBottom: `1px solid ${C.track}` }}>
+                            <td style={{ padding: "6px 10px", fontWeight: 600, whiteSpace: "nowrap" }}>{MONTHS[mo - 1]} {y}</td>
+                            <td style={{ padding: "6px 10px" }}><EditNum value={rev || ""} prefix="$" onCommit={(v) => setCell(d.pid, key, "revenue", v)} /></td>
+                            <td style={{ padding: "6px 10px" }}><EditNum value={occ != null ? (occ * 100).toFixed(1) : ""} suffix="%" width={70} onCommit={(v) => setCell(d.pid, key, "occ", v)} /></td>
+                            <td style={{ padding: "6px 10px", color: C.muted }}>{nights != null ? nights : "—"}</td>
+                            <td style={{ padding: "6px 10px" }}>{fmtMoney(adr)}</td>
+                            <td style={{ padding: "6px 10px" }}>{fmtMoney(revpar)}</td>
                           </tr>
                         );
                       })}
@@ -1630,20 +1646,14 @@ function AuditPage({ model }) {
                 </div>
                 {d.ota?.length > 0 && (
                   <div style={{ marginTop: 14 }}>
-                    <div className="ui" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: .4, color: C.muted, marginBottom: 6 }}>Channel revenue (from reservation source column)</div>
+                    <div className="ui" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: .4, color: C.muted, marginBottom: 6 }}>Channel revenue on file</div>
                     <div className="ui" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                       {d.ota.sort((a, b) => b.value - a.value).map((o) => (
                         <span key={o.name} style={{ fontSize: 12.5, padding: "4px 10px", borderRadius: 8, background: "#f4f6f8", display: "flex", alignItems: "center", gap: 6 }}>
-                          <span style={{ width: 9, height: 9, borderRadius: 3, background: OTA_COLORS[o.name] || OTA_COLORS.Other }} />
-                          {o.name}: {fmtMoney(o.value)}
+                          <span style={{ width: 9, height: 9, borderRadius: 3, background: OTA_COLORS[o.name] || OTA_COLORS.Other }} />{o.name}: {fmtMoney(o.value)}
                         </span>
                       ))}
                     </div>
-                  </div>
-                )}
-                {d.raw?.snapshot && (
-                  <div className="ui" style={{ marginTop: 14, fontSize: 12.5, color: C.muted }}>
-                    Annual snapshot on file (used only when no monthly data exists): revenue {fmtMoney(d.raw.snapshot.revenue)}{d.raw.snapshot.revenueLY ? `, prior-year ${fmtMoney(d.raw.snapshot.revenueLY)}` : ""}.
                   </div>
                 )}
               </div>
@@ -1654,12 +1664,16 @@ function AuditPage({ model }) {
     </div>
   );
 }
-function AuditCell({ value, fromFile }) {
+function EditNum({ value, onCommit, prefix, suffix, width = 95 }) {
+  const [v, setV] = useState(value ?? "");
+  useEffect(() => { setV(value ?? ""); }, [value]);
   return (
-    <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
-      {value}
-      <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: fromFile ? "#1f7a4d" : "#b7791f" }}>{value === "—" ? "" : fromFile ? "from file" : "computed"}</span>
-    </td>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+      {prefix && <span style={{ color: C.muted, fontSize: 12 }}>{prefix}</span>}
+      <input value={v} onChange={(e) => setV(e.target.value)} onBlur={() => onCommit(v)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+        placeholder="—" style={{ width, fontSize: 13, padding: "5px 7px", borderRadius: 6, border: `1px solid ${C.border}`, background: "#fff" }} />
+      {suffix && <span style={{ color: C.muted, fontSize: 12 }}>{suffix}</span>}
+    </span>
   );
 }
 
