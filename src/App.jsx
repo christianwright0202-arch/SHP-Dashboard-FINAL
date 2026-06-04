@@ -333,6 +333,7 @@ function ingestSheet(rows, ctx) {
     for (const row of rows) {
       // update current month/year if this row carries a month label (with or without a year)
       for (const cell of row) {
+        if (cell instanceof Date && cell.getDate() === 1 && cell.getFullYear() > 2015) { curMonth = cell.getMonth(); curYear = cell.getFullYear(); break; }
         const s = String(cell); const my = s.match(MONTH_YEAR_RE);
         if (my) { curMonth = MONTH_IDX[my[1].toLowerCase().slice(0, 3)]; curYear = +my[2]; break; }
         const mo = norm(s).match(bareMonth);
@@ -682,7 +683,9 @@ function Dashboard() {
           const buf = await readFileAsArrayBuffer(file);
           const wb = XLSX.read(buf, { type: "array", cellDates: true });
           const ctx = { filename: file.name, propOverride: propOverride !== "auto" ? propOverride : null };
+          const SKIP_SHEET = /daily|weekly|analysis|title option|^sheet\s*\d+\s*$/i;
           for (const sn of wb.SheetNames) {
+            if (wb.SheetNames.length > 1 && SKIP_SHEET.test(String(sn).trim())) continue; // raw logs/scratch tabs poison property attribution
             const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: "" });
             records.push(...ingestSheet(rows, ctx));
           }
