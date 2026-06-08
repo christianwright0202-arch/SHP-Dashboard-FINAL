@@ -532,6 +532,13 @@ function deriveProperty(pid, model) {
     label: `${MONTHS[now.getMonth()]} ${thisYear}`,
     revenue: cmRow ? (cmRow.revenue || 0) : 0,
     prevRevenue: pmRow ? (pmRow.revenue || 0) : null,
+    nights: cmRow ? (cmRow.nights ?? null) : null,
+    occ: cmRow ? (cmRow.occ ?? null) : null,
+    adr: cmRow ? (cmRow.adr ?? null) : null,
+    revpar: cmRow ? (cmRow.revpar ?? null) : null,
+    prevOcc: pmRow ? (pmRow.occ ?? null) : null,
+    prevAdr: pmRow ? (pmRow.adr ?? null) : null,
+    prevRevpar: pmRow ? (pmRow.revpar ?? null) : null,
     has: !!cmRow,
   };
   // run-rate forecast for the current month
@@ -573,11 +580,11 @@ function buildKpi(d) {
     ytdRevenue: d.ytd,
     ytdLabel: `${d.ytdYear} YTD`,
     ytdDelta: d.ytdPrior > 0 ? delta(d.ytd, d.ytdPrior) : null,
-    occ: d.latest?.occ ?? null, adr: d.latest?.adr ?? null, revpar: d.latest?.revpar ?? null,
-    metricLabel: d.latest?.label || "—",
-    occDelta: delta(d.latest?.occ, d.prev?.occ),
-    adrDelta: delta(d.latest?.adr, d.prev?.adr),
-    revparDelta: delta(d.latest?.revpar, d.prev?.revpar),
+    occ: d.currentMonth.occ ?? null, adr: d.currentMonth.adr ?? null, revpar: d.currentMonth.revpar ?? null,
+    metricLabel: d.currentMonth.label,
+    occDelta: delta(d.currentMonth.occ, d.currentMonth.prevOcc),
+    adrDelta: delta(d.currentMonth.adr, d.currentMonth.prevAdr),
+    revparDelta: delta(d.currentMonth.revpar, d.currentMonth.prevRevpar),
   };
 }
 
@@ -1014,16 +1021,17 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
   const derived = useMemo(() => props.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model, propIds.join()]);
 
   const kpi = useMemo(() => {
+    const now = new Date();
     let cmRev = 0, ytdRev = 0, ytdPrior = 0, nights = 0, avail = 0, adrW = 0, adrN = 0, occSum = 0, occN = 0, cmLabel = "", ytdLabel = "";
     derived.forEach((d) => {
       cmRev += d.currentMonth.revenue || 0; ytdRev += d.ytd || 0; ytdPrior += d.ytdPrior || 0;
       cmLabel = d.currentMonth.label; ytdLabel = `${d.ytdYear} YTD`;
-      const L = d.latest;
-      if (L) {
-        nights += L.nights || 0;
-        if (L.mIdx != null) { avail += d.meta.units * daysInMonth(L.year, L.mIdx); }
-        if (L.adr != null) { adrW += L.adr * (L.nights || 1); adrN += (L.nights || 1); }
-        if (L.occ != null) { occSum += L.occ; occN++; }
+      const cm = d.currentMonth;
+      if (cm && cm.has) {
+        nights += cm.nights || 0;
+        avail += d.meta.units * daysInMonth(now.getFullYear(), now.getMonth());
+        if (cm.adr != null) { adrW += cm.adr * (cm.nights || 1); adrN += (cm.nights || 1); }
+        if (cm.occ != null) { occSum += cm.occ; occN++; }
       }
     });
     const occ = avail ? Math.min(1, nights / avail) : (occN ? occSum / occN : null);
@@ -1031,7 +1039,7 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
     return {
       currentMonthRevenue: cmRev, currentMonthLabel: cmLabel || "Current month", currentMonthDelta: null,
       ytdRevenue: ytdRev, ytdLabel: ytdLabel || "YTD", ytdDelta: ytdPrior > 0 ? delta(ytdRev, ytdPrior) : null,
-      occ, adr, revpar: adr && occ ? adr * occ : null, metricLabel: "latest month",
+      occ, adr, revpar: adr && occ ? adr * occ : null, metricLabel: cmLabel || "current month",
       occDelta: null, adrDelta: null, revparDelta: null,
     };
   }, [derived]);
