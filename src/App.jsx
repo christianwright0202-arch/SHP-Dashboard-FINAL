@@ -327,6 +327,7 @@ function ingestSheet(rows, ctx) {
     const cRev = find("rental revenue", "revenue");
     const cADR = find("adr"); const cRevpar = find("revpar");
     const cRevLY = colWhere((h) => h.includes("revenue") && h.includes("ly"));
+    const cMonth = colWhere((h) => h === "month" || h === "period" || h === "month/year");
     const bareMonth = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?$/;
     let curYear = ctx.asYear || new Date().getFullYear();
     let curMonth = null;
@@ -340,6 +341,12 @@ function ingestSheet(rows, ctx) {
         if (mo) { curMonth = MONTH_IDX[mo[1].slice(0, 3)]; break; }
       }
       if (row.some((c) => norm(c).includes("listing name"))) continue; // header row
+      // an explicit Month/Period column (one value per row) is the most reliable source
+      if (cMonth >= 0) {
+        const mc = row[cMonth];
+        const dt = mc instanceof Date ? mc : toDate(mc);
+        if (dt && !isNaN(dt.getTime())) { curMonth = dt.getMonth(); curYear = dt.getFullYear(); }
+      }
       const list = row[cList]; if (!list || norm(list) === "total" || norm(list) === "listing name") continue;
       const prop = classifyListing(list) || ctx.propOverride; if (!prop) continue;
       const rev = cRev >= 0 ? num(row[cRev]) : null; if (rev == null) continue;
