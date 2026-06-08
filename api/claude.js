@@ -27,8 +27,6 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
-        // Required header for the server-side web search tool (Events page)
-        "anthropic-beta": "web-search-2025-03-05",
       },
       body: JSON.stringify(req.body),
     });

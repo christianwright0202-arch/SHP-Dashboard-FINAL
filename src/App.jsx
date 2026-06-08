@@ -612,17 +612,35 @@ function delta(cur, prev) { if (cur == null || prev == null || prev === 0) retur
 
 /* ---------------- Claude API ---------------- */
 async function callClaude({ messages, system, tools, max_tokens = 1000 }) {
-  const body = { model: "claude-sonnet-4-6", max_tokens, messages };
-  if (system) body.system = system;
-  if (tools) body.tools = tools;
-  const res = await fetch("/api/claude", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-app-password": import.meta.env.VITE_APP_PASSWORD || "" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error("API " + res.status);
-  const data = await res.json();
-  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  let convo = messages.slice();
+  for (let turn = 0; turn < 4; turn++) {
+    const body = { model: "claude-sonnet-4-6", max_tokens, messages: convo };
+    if (system) body.system = system;
+    if (tools) body.tools = tools;
+    const res = await fetch("/api/claude", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-app-password": import.meta.env.VITE_APP_PASSWORD || "" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      let msg = "API " + res.status;
+      try { const e = await res.json(); msg = (e && e.error && (e.error.message || e.error)) || msg; } catch {}
+      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    }
+    const data = await res.json();
+    // web search can pause mid-turn; resend the partial assistant turn to let it finish
+    if (data.stop_reason === "pause_turn" && Array.isArray(data.content)) {
+      convo = convo.concat([{ role: "assistant", content: data.content }]);
+      continue;
+    }
+    return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  }
+  throw new Error("The model kept searching without finishing — try again.");
+}
+function extractJson(s) {
+  const clean = String(s || "").replace(/```json|```/g, "");
+  const start = clean.indexOf("{"); const end = clean.lastIndexOf("}");
+  return start >= 0 && end > start ? clean.slice(start, end + 1) : clean.trim();
 }
 function snapshotForAI(model, propIds) {
   const lines = [];
@@ -824,14 +842,6 @@ function Dashboard() {
               {busy ? <Loader2 size={15} className="spin" style={{ animation: "spin 1s linear infinite" }} /> : <Upload size={15} />} Upload data
             </button>
             <span style={{ fontSize: 12, color: C.muted }}>.xlsx · .csv · .png · .jpg · .pdf — drag & drop anywhere</span>
-            <button className="navbtn" onClick={refreshHostfully} disabled={busy}
-              style={{ background: "#fff", color: C.slate, border: `1px solid ${C.borderStrong}`, borderRadius: 9, padding: "9px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
-              <Activity size={15} /> Refresh from Hostfully
-            </button>
-            <button className="navbtn" onClick={runHfDebug} disabled={busy} title="Run Hostfully diagnostics in-app"
-              style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 9, padding: "9px 12px", fontSize: 12.5, cursor: "pointer" }}>
-              Diagnostics
-            </button>
             <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 11, color: C.muted }}>Assign to:</span>
               <select value={propOverride} onChange={(e) => setPropOverride(e.target.value)}
@@ -847,17 +857,6 @@ function Dashboard() {
             <div className="ui" style={{ margin: "12px 28px 0", padding: "10px 14px", borderRadius: 9, fontSize: 13, background: ingestMsg.ok ? "#eaf6ef" : "#fdeeee", color: ingestMsg.ok ? C.good : C.bad, border: `1px solid ${ingestMsg.ok ? "#cfe9da" : "#f2cccc"}`, display: "flex", justifyContent: "space-between" }}>
               <span>{ingestMsg.text}</span>
               <X size={15} style={{ cursor: "pointer" }} onClick={() => setIngestMsg(null)} />
-            </div>
-          )}
-
-          {hfDebug && (
-            <div className="ui" style={{ margin: "12px 28px 0", padding: "12px 14px", borderRadius: 9, background: "#0f1b2d", border: "1px solid #243244" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                <span style={{ color: "#9fb0c6", fontSize: 12, fontWeight: 700, letterSpacing: .5, textTransform: "uppercase" }}>Hostfully diagnostics</span>
-                <button onClick={() => navigator.clipboard?.writeText(hfDebug)} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid #34465c", background: "#1b2a3f", color: "#cfe0f0", cursor: "pointer" }}>Copy</button>
-                <X size={15} style={{ cursor: "pointer", color: "#9fb0c6", marginLeft: "auto" }} onClick={() => setHfDebug(null)} />
-              </div>
-              <pre style={{ margin: 0, maxHeight: 280, overflow: "auto", fontSize: 11.5, lineHeight: 1.5, color: "#cfe0f0", fontFamily: "ui-monospace, Menlo, monospace", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{hfDebug}</pre>
             </div>
           )}
 
@@ -1553,16 +1552,18 @@ function Events({ model, setModel, onFiles }) {
   const pull = async () => {
     setBusy(true); setErr(null);
     try {
+      const today = new Date(); const end = new Date(today.getTime() + 90 * 86400000);
       const out = await callClaude({
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        system: "You find demand-driving events for hotel revenue managers. Return ONLY JSON, no markdown.",
-        messages: [{ role: "user", content: `Find notable upcoming events (next ~90 days from ${new Date().toDateString()}) that drive lodging demand in (A) Fort Worth — TCU sports & events, Dickies Arena, Will Rogers Memorial Center, Fort Worth Convention Center; and (B) Arlington — AT&T Stadium, Globe Life Field, UTA, and Arlington Convention Center. Return JSON: {"events":[{"date":"YYYY-MM-DD","name":"...","venue":"...","market":"Fort Worth" or "Arlington","impact":"high|med|low"}]}. Sort by date.` }],
-        max_tokens: 1500,
+        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 6 }],
+        system: "You are a research assistant for a hotel revenue manager. Search the web for real, specific, dated events. Output ONLY a single JSON object — no prose, no markdown fences, no citations text.",
+        messages: [{ role: "user", content: `Search the web for notable events between ${today.toISOString().slice(0, 10)} and ${end.toISOString().slice(0, 10)} that drive hotel/short-term-rental demand in these two markets:\n(A) Fort Worth, TX — TCU sports, Dickies Arena concerts/events, Will Rogers Memorial Center, Fort Worth Convention Center, Stockyards events.\n(B) Arlington, TX — AT&T Stadium (Cowboys, concerts, FIFA World Cup 2026 matches), Globe Life Field (Texas Rangers home games), UT Arlington, Arlington Convention Center, Six Flags events.\nReturn ONLY this JSON shape and nothing else:\n{"events":[{"date":"YYYY-MM-DD","name":"...","venue":"...","market":"Fort Worth","impact":"high"}]}\nUse market exactly "Fort Worth" or "Arlington". Use impact "high" for stadium/arena-scale events, "med" for mid-size, "low" for minor. Sort by date. Include at least 8 events per market if available.` }],
+        max_tokens: 4096,
       });
-      const clean = out.replace(/```json|```/g, "").trim();
-      const m = clean.match(/\{[\s\S]*\}/); const parsed = JSON.parse(m ? m[0] : clean);
-      setModel((mod) => ({ ...mod, events: parsed.events || [], eventsSource: "ai", lastUpdated: new Date().toISOString() }));
-    } catch (e) { setErr("Couldn't pull events — try again, or upload a calendar file."); }
+      const parsed = JSON.parse(extractJson(out));
+      const events = (parsed.events || []).filter((e) => e && e.name && e.date);
+      if (!events.length) throw new Error("No events came back — try again.");
+      setModel((mod) => ({ ...mod, events, eventsSource: "ai", lastUpdated: new Date().toISOString() }));
+    } catch (e) { setErr("Couldn't pull events: " + (e.message || "unknown error") + ". You can also upload a calendar file."); }
     setBusy(false);
   };
   const onUpload = async (files) => {
@@ -2020,7 +2021,7 @@ function WorldCupPage({ model, onUpload }) {
                 )}
                 <div style={{ position: "absolute", bottom: 5, left: 7, right: 7 }}>
                   <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#fff" : C.ink }}>{cell.occ != null ? (cell.occ * 100).toFixed(0) + "%" : "—"}</div>
-                  <div style={{ fontSize: 9.5, color: dark ? "rgba(255,255,255,.85)" : C.muted }}>{cell.revenue ? fmtMoney(cell.revenue) : ""}</div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: dark ? "#fff" : C.ink }}>{cell.revenue ? fmtMoney(cell.revenue) : ""}</div>
                 </div>
               </div>
             );
