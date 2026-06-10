@@ -54,7 +54,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 const MONTH_IDX = Object.fromEntries(MONTHS.map((m, i) => [m.toLowerCase(), i]));
 const OTA_COLORS = { Airbnb: "#e23b3b", Vrbo: "#1668e3", Expedia: "#f5c518", "Booking.com": "#f08a24", Direct: "#1f7a4d", Other: "#94a3b8" };
 
-const MODEL = { properties: {}, events: [], eventsSource: "none", lastUpdated: null, goals: {}, activity: [], deals: [] };
+const MODEL = { properties: {}, ads: {}, events: [], eventsSource: "none", lastUpdated: null, goals: {}, activity: [], deals: [] };
 
 // World Cup window + AT&T Stadium (Dallas Stadium), Arlington fixtures
 const WC_START = "2026-06-12", WC_END = "2026-07-15";
@@ -123,6 +123,16 @@ function toDate(v) {
 const mkey = (y, mIdx) => `${y}-${String(mIdx + 1).padStart(2, "0")}`;
 const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const parseUnits = (name) => { const m = String(name || "").match(/--\s*(\d+)\s*units/i); return m ? +m[1] : 1; };
+// pull a year-month from a filename like "Bookingcom_SOMA_2026-06.csv"
+function monthFromFilename(fn) {
+  const s = String(fn || "");
+  let m = s.match(/(20\d\d)[-_.]?(0[1-9]|1[0-2])(?!\d)/); if (m) return { y: +m[1], m: +m[2] - 1 };
+  const mm = s.toLowerCase().match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?[-_ ]*(20\d\d)?/);
+  if (mm && MONTH_IDX[mm[1]] != null) return { y: mm[2] ? +mm[2] : new Date().getFullYear(), m: MONTH_IDX[mm[1]] };
+  m = s.match(/\b(0[1-9]|1[0-2])[-_.](20\d\d)\b/); if (m) return { y: +m[2], m: +m[1] - 1 };
+  return null;
+}
+const money = (v) => { const n = parseFloat(String(v ?? "").replace(/[$,%\s]/g, "")); return isFinite(n) ? n : 0; };
 function wcDateList() {
   const out = []; const s = new Date(WC_START + "T00:00"); const e = new Date(WC_END + "T00:00");
   for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) out.push(isoDate(d));
@@ -166,6 +176,44 @@ function findMonthYearNear(rows, hr) {
 /* Ingest one sheet -> array of normalized records */
 function ingestSheet(rows, ctx) {
   const out = [];
+
+  // AD SPEND REPORTS — Expedia TravelAds (daily, has Date) or Booking.com (campaign totals, no Date)
+  {
+    const N = rows.map((r) => (r || []).map(norm));
+    const hi = N.findIndex((r) => r.some((c) => c.includes("campaign")) && r.some((c) => c === "spend"));
+    if (hi >= 0) {
+      const H = N[hi]; const find = (pred) => H.findIndex(pred);
+      const isExpedia = H.some((c) => c.includes("gross bookings")) || H.includes("date");
+      const isBooking = H.some((c) => c.includes("return on ad spend")) || H.some((c) => c.includes("revenue per booking"));
+      const cCamp = find((c) => c.includes("campaign"));
+      const cSpend = find((c) => c === "spend");
+      if (cCamp >= 0 && cSpend >= 0 && (isExpedia || isBooking)) {
+        const channel = isExpedia ? "Expedia" : "Booking.com";
+        const cRev = isExpedia ? find((c) => c === "gross bookings total") : find((c) => c === "revenue");
+        const cBook = isExpedia ? find((c) => c === "bookings total") : find((c) => c === "bookings");
+        const cDate = find((c) => c === "date");
+        const cImp = find((c) => c === "impressions");
+        const cClicks = find((c) => c === "clicks");
+        const fm = monthFromFilename(ctx.filename);
+        for (let i = hi + 1; i < rows.length; i++) {
+          const r = rows[i]; if (!r) continue;
+          const camp = String(r[cCamp] ?? ""); const cl = norm(camp);
+          if (!cl || cl.includes("grand total") || cl === "total") continue;
+          const prop = classifyListing(camp) || ctx.propOverride; if (!prop) continue;
+          let y, mo;
+          if (cDate >= 0 && r[cDate]) { const dt = r[cDate] instanceof Date ? r[cDate] : toDate(r[cDate]); if (dt && !isNaN(dt.getTime())) { y = dt.getFullYear(); mo = dt.getMonth(); } }
+          if (mo == null && fm) { y = fm.y; mo = fm.m; }
+          if (mo == null) { const now = new Date(); y = now.getFullYear(); mo = now.getMonth(); }
+          const spend = money(r[cSpend]); const rev = cRev >= 0 ? money(r[cRev]) : 0;
+          const bookings = cBook >= 0 ? money(r[cBook]) : 0; const imp = cImp >= 0 ? money(r[cImp]) : 0; const clk = cClicks >= 0 ? money(r[cClicks]) : 0;
+          if (!spend && !rev && !bookings) continue;
+          out.push({ kind: "ad", prop, channel, year: y, mIdx: mo, month: mkey(y, mo), spend, revenue: rev, bookings, impressions: imp, clicks: clk });
+        }
+        if (out.length) return out;
+      }
+    }
+  }
+
   const hr = detectHeader(rows);
   if (hr < 0) return out;
   const headers = rows[hr].map((x) => String(x ?? ""));
@@ -370,8 +418,10 @@ function applyRecords(model, records) {
 
   // PASS 1: figure out which buckets this batch will write, so a re-upload REPLACES rather than double-counts
   const touch = {};
+  const adTouch = {};
   for (const rec of records) {
     if (!rec.prop || rec.prop === "unknown") continue;
+    if (rec.kind === "ad") { (adTouch[rec.prop] = adTouch[rec.prop] || new Set()).add(rec.channel + "||" + rec.month); continue; }
     const t = (touch[rec.prop] = touch[rec.prop] || { months: new Set(), wcDates: new Set(), snapshot: false, pace: false });
     if (rec.kind === "listingmonth") { t.months.add(rec.month); if (rec.monthLY) t.months.add(rec.monthLY); }
     else if (rec.kind === "res" || rec.kind === "monthly") t.months.add(rec.month);
@@ -388,10 +438,22 @@ function applyRecords(model, records) {
     if (touch[pid].pace) p.pace = null;
     if (touch[pid].snapshot) p.snapshot = null;
   }
+  for (const pid of Object.keys(adTouch)) {
+    next.ads = next.ads || {}; const pa = (next.ads[pid] = next.ads[pid] || {});
+    for (const ck of adTouch[pid]) { const [ch, mo] = ck.split("||"); if (pa[ch]) delete pa[ch][mo]; }
+  }
 
   // PASS 2: apply (accumulate within this single batch)
   for (const rec of records) {
     if (!rec.prop || rec.prop === "unknown") continue;
+    if (rec.kind === "ad") {
+      next.ads = next.ads || {};
+      const pa = (next.ads[rec.prop] = next.ads[rec.prop] || {});
+      const ch = (pa[rec.channel] = pa[rec.channel] || {});
+      const m = (ch[rec.month] = ch[rec.month] || { spend: 0, revenue: 0, bookings: 0, impressions: 0, clicks: 0 });
+      m.spend += rec.spend || 0; m.revenue += rec.revenue || 0; m.bookings += rec.bookings || 0; m.impressions += rec.impressions || 0; m.clicks += rec.clicks || 0;
+      continue;
+    }
     const p = (next.properties[rec.prop] = next.properties[rec.prop] || { monthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
 
     if (rec.kind === "wc") {
@@ -555,7 +617,23 @@ function deriveProperty(pid, model) {
   const otaByMonth = p.otaByMonth || {};
   const goal = (model.goals && model.goals[pid] != null) ? model.goals[pid] : (meta.goal || null);
 
-  return { pid, meta, series, latest, prev, snap, yoy, years, curY, priorY, ota, raw: p, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+}
+// Aggregate ad spend/revenue/ROAS per channel for a property
+function deriveAds(model, pid) {
+  const a = model.ads && model.ads[pid];
+  if (!a || !Object.keys(a).length) return null;
+  const channels = Object.keys(a).map((ch) => {
+    const months = Object.keys(a[ch]).sort().map((mk) => {
+      const [y, m] = mk.split("-").map(Number); const d = a[ch][mk];
+      return { key: mk, label: `${MONTHS[m - 1]} ${y}`, ...d, roas: d.spend > 0 ? d.revenue / d.spend : null };
+    });
+    const tot = months.reduce((t, r) => ({ spend: t.spend + (r.spend || 0), revenue: t.revenue + (r.revenue || 0), bookings: t.bookings + (r.bookings || 0) }), { spend: 0, revenue: 0, bookings: 0 });
+    return { channel: ch, months, total: { ...tot, roas: tot.spend > 0 ? tot.revenue / tot.spend : null } };
+  });
+  const spend = channels.reduce((s, c) => s + c.total.spend, 0);
+  const revenue = channels.reduce((s, c) => s + c.total.revenue, 0);
+  return { channels, blended: { spend, revenue, roas: spend > 0 ? revenue / spend : null } };
 }
 
 // Composite property health score (0-100)
@@ -814,6 +892,7 @@ function Dashboard() {
           ))}
           <div style={{ fontSize: 10, letterSpacing: 2, color: "#6c7d96", margin: "16px 8px 6px", fontWeight: 700 }}>INTELLIGENCE</div>
           <NavItem icon={<Calendar size={17} />} label="Events" active={page === "events"} onClick={() => setPage("events")} color="#8ea0b8" />
+          <NavItem icon={<TrendingUp size={17} />} label="Ad Performance" active={page === "ads"} onClick={() => setPage("ads")} color="#8ea0b8" />
           <NavItem icon={<MessageSquare size={17} />} label="Ask the Board" active={page === "ask"} onClick={() => setPage("ask")} color="#8ea0b8" />
           <NavItem icon={<Search size={17} />} label="Data Audit" active={page === "audit"} onClick={() => setPage("audit")} color="#8ea0b8" />
           <NavItem icon={<Briefcase size={17} />} label="Sales Pipeline" active={page === "sales"} onClick={() => setPage("sales")} color="#8ea0b8" />
@@ -868,6 +947,7 @@ function Dashboard() {
                 : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
                   : page === "ask" ? <AskPage model={model} />
                     : page === "audit" ? <AuditPage model={model} setModel={setModel} />
+                    : page === "ads" ? <AdPage model={model} />
                     : page === "sales" ? <SalesPipeline model={model} setModel={setModel} />
                     : <PropertyPage pid={page} model={model} setModel={setModel} />}
           </div>
@@ -1420,7 +1500,147 @@ function PropertyPage({ pid, model, setModel }) {
       </div>
       <div style={{ marginTop: 16 }}><PacePanel derived={[d]} title="Pace & pickup" /></div>
       <div style={{ marginTop: 16 }}><ChannelOverTime derived={[d]} /></div>
+      {deriveAds(model, pid) && <div style={{ marginTop: 16 }}><AdPanel ads={deriveAds(model, pid)} color={meta.color} /></div>}
+      <div style={{ marginTop: 16 }}><YoyReport d={d} /></div>
       <div style={{ marginTop: 16 }}><PropertyAdvisor d={d} /></div>
+    </div>
+  );
+}
+
+/* ---------------- HISTORICAL MONTHLY REPORT (YoY) ---------------- */
+function YoyReport({ d }) {
+  const cur = d.curY, prior = d.priorY;
+  if (cur == null) return null;
+  const pctd = (x, y) => (x != null && y != null && y !== 0) ? (x - y) / y : null;
+  const monthRows = MONTHS.map((mn, i) => ({ mn, a: d.byYear[cur]?.[i] || null, b: prior != null ? (d.byYear[prior]?.[i] || null) : null })).filter((r) => r.a || r.b);
+  if (!monthRows.length) return null;
+  const totA = monthRows.reduce((s, r) => s + (r.a?.revenue || 0), 0);
+  const totB = monthRows.reduce((s, r) => s + (r.b?.revenue || 0), 0);
+  const dCell = (x, y) => { const p = pctd(x, y); return p == null ? <span style={{ color: C.faint }}>—</span> : <span style={{ color: p >= 0 ? C.good : C.bad, fontWeight: 600 }}>{p >= 0 ? "+" : ""}{(p * 100).toFixed(0)}%</span>; };
+  const m$ = (v) => v != null ? fmtMoney(v) : "—";
+  const pc = (v) => v != null ? fmtPct(v) : "—";
+  return (
+    <Panel title="Historical monthly report — year over year" right={prior != null ? <span className="ui" style={{ fontSize: 12.5, color: C.muted }}>{cur} vs {prior}</span> : null}>
+      {prior == null && <div className="ui" style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>No prior-year data on file yet, so this shows {cur} actuals. Once a file with last-year columns is uploaded, the comparison fills in automatically.</div>}
+      <div style={{ overflowX: "auto" }}>
+        <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, whiteSpace: "nowrap" }}>
+          <thead>
+            <tr style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .3, textAlign: "right" }}>
+              <th style={{ padding: "7px 9px", textAlign: "left", borderBottom: `2px solid ${C.border}` }}>Month</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Rev {cur}</th>
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Rev {prior}</th>}
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Δ</th>}
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Occ {cur}</th>
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Occ {prior}</th>}
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>ADR {cur}</th>
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>ADR {prior}</th>}
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>RevPAR {cur}</th>
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>RevPAR {prior}</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {monthRows.map((r) => (
+              <tr key={r.mn} style={{ borderBottom: `1px solid ${C.track}`, textAlign: "right" }}>
+                <td style={{ padding: "6px 9px", textAlign: "left", fontWeight: 600 }}>{r.mn}</td>
+                <td style={{ padding: "6px 9px" }}>{m$(r.a?.revenue)}</td>
+                {prior != null && <td style={{ padding: "6px 9px", color: C.muted }}>{m$(r.b?.revenue)}</td>}
+                {prior != null && <td style={{ padding: "6px 9px" }}>{dCell(r.a?.revenue, r.b?.revenue)}</td>}
+                <td style={{ padding: "6px 9px" }}>{pc(r.a?.occ)}</td>
+                {prior != null && <td style={{ padding: "6px 9px", color: C.muted }}>{pc(r.b?.occ)}</td>}
+                <td style={{ padding: "6px 9px" }}>{m$(r.a?.adr)}</td>
+                {prior != null && <td style={{ padding: "6px 9px", color: C.muted }}>{m$(r.b?.adr)}</td>}
+                <td style={{ padding: "6px 9px" }}>{m$(r.a?.revpar)}</td>
+                {prior != null && <td style={{ padding: "6px 9px", color: C.muted }}>{m$(r.b?.revpar)}</td>}
+              </tr>
+            ))}
+            <tr style={{ borderTop: `2px solid ${C.border}`, textAlign: "right", fontWeight: 700 }}>
+              <td style={{ padding: "8px 9px", textAlign: "left" }}>Total</td>
+              <td style={{ padding: "8px 9px" }}>{fmtMoney(totA)}</td>
+              {prior != null && <td style={{ padding: "8px 9px", color: C.muted }}>{fmtMoney(totB)}</td>}
+              {prior != null && <td style={{ padding: "8px 9px" }}>{dCell(totA, totB)}</td>}
+              <td colSpan={prior != null ? 6 : 3} />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+
+/* ---------------- AD PERFORMANCE ---------------- */
+const roasColor = (r) => r == null ? "#94a3b8" : r < 2 ? "#c0392b" : r < 8 ? "#b7791f" : "#1f7a4d";
+function AdPanel({ ads, color }) {
+  const b = ads.blended;
+  return (
+    <Panel title="Ad performance — Expedia & Booking.com" right={b.roas != null ? <span className="ui" style={{ fontSize: 13, fontWeight: 700, color: roasColor(b.roas) }}>{b.roas.toFixed(1)}:1 blended ROAS</span> : null}>
+      <div style={{ display: "flex", gap: 22, marginBottom: 14, flexWrap: "wrap" }}>
+        <Mini label="Total ad spend" val={fmtMoney(b.spend)} />
+        <Mini label="Ad-attributed revenue" val={fmtMoney(b.revenue)} />
+        <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4 }}>Blended ROAS</div><div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontWeight: 700, color: roasColor(b.roas) }}>{b.roas != null ? `${b.roas.toFixed(1)}:1` : "—"}</div></div>
+      </div>
+      {ads.channels.map((c) => (
+        <div key={c.channel} style={{ marginBottom: 16 }}>
+          <div className="ui" style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, color: C.ink, fontSize: 13.5, marginBottom: 6 }}>
+            <span style={{ width: 9, height: 9, borderRadius: 3, background: OTA_COLORS[c.channel] || OTA_COLORS.Other }} />{c.channel}
+            <span style={{ marginLeft: "auto", fontSize: 12.5, color: roasColor(c.total.roas), fontWeight: 700 }}>{c.total.roas != null ? `${c.total.roas.toFixed(1)}:1` : "—"}</span>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, whiteSpace: "nowrap" }}>
+              <thead>
+                <tr style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .3, textAlign: "right" }}>
+                  <th style={{ padding: "6px 9px", textAlign: "left", borderBottom: `2px solid ${C.border}` }}>Month</th>
+                  <th style={{ padding: "6px 9px", borderBottom: `2px solid ${C.border}` }}>Spend</th>
+                  <th style={{ padding: "6px 9px", borderBottom: `2px solid ${C.border}` }}>Revenue</th>
+                  <th style={{ padding: "6px 9px", borderBottom: `2px solid ${C.border}` }}>Bookings</th>
+                  <th style={{ padding: "6px 9px", borderBottom: `2px solid ${C.border}` }}>ROAS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {c.months.map((m) => (
+                  <tr key={m.key} style={{ borderBottom: `1px solid ${C.track}`, textAlign: "right" }}>
+                    <td style={{ padding: "6px 9px", textAlign: "left", fontWeight: 600 }}>{m.label}</td>
+                    <td style={{ padding: "6px 9px" }}>{fmtMoney(m.spend)}</td>
+                    <td style={{ padding: "6px 9px" }}>{fmtMoney(m.revenue)}</td>
+                    <td style={{ padding: "6px 9px", color: C.muted }}>{m.bookings || 0}</td>
+                    <td style={{ padding: "6px 9px", fontWeight: 700, color: roasColor(m.roas) }}>{m.roas != null ? `${m.roas.toFixed(1)}:1` : "—"}</td>
+                  </tr>
+                ))}
+                <tr style={{ borderTop: `2px solid ${C.border}`, textAlign: "right", fontWeight: 700 }}>
+                  <td style={{ padding: "7px 9px", textAlign: "left" }}>Total</td>
+                  <td style={{ padding: "7px 9px" }}>{fmtMoney(c.total.spend)}</td>
+                  <td style={{ padding: "7px 9px" }}>{fmtMoney(c.total.revenue)}</td>
+                  <td style={{ padding: "7px 9px", color: C.muted }}>{c.total.bookings || 0}</td>
+                  <td style={{ padding: "7px 9px", color: roasColor(c.total.roas) }}>{c.total.roas != null ? `${c.total.roas.toFixed(1)}:1` : "—"}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
+      <div className="ui" style={{ fontSize: 11.5, color: C.muted, display: "flex", gap: 14, flexWrap: "wrap", marginTop: 2 }}>
+        <span><span style={{ color: roasColor(1) }}>●</span> below 2:1 break-even</span>
+        <span><span style={{ color: roasColor(4) }}>●</span> 2–8:1 (above break-even, below 8:1 floor)</span>
+        <span><span style={{ color: roasColor(10) }}>●</span> 8:1+ (target 10–12:1)</span>
+      </div>
+    </Panel>
+  );
+}
+function AdPage({ model }) {
+  const withAds = PROPERTIES.filter((p) => model.ads && model.ads[p.id] && Object.keys(model.ads[p.id]).length);
+  return (
+    <div>
+      <SectionTitle sub="Expedia TravelAds & Booking.com ad spend, revenue, and ROAS by property">Ad Performance</SectionTitle>
+      {!withAds.length ? (
+        <Panel title="No ad data yet"><Empty text="Upload an Expedia TravelAds report (daily) or a Booking.com campaign report (name the file with the month, e.g. Bookingcom_SOMA_2026-06.csv). Property and channel are detected automatically." /></Panel>
+      ) : withAds.map((p) => (
+        <div key={p.id} style={{ marginBottom: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "4px 0 10px" }}>
+            <span style={{ width: 13, height: 13, borderRadius: 4, background: p.color }} />
+            <span style={{ fontFamily: "Georgia,serif", fontSize: 20, fontWeight: 700 }}>{p.name}</span>
+          </div>
+          <AdPanel ads={deriveAds(model, p.id)} color={p.color} />
+        </div>
+      ))}
     </div>
   );
 }
