@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis,
-  CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, AreaChart,
+  CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, AreaChart, ReferenceLine,
 } from "recharts";
 import * as XLSX from "xlsx";
 import { loadModel, saveModel } from "./storage";
@@ -586,6 +586,7 @@ function deriveProperty(pid, model) {
   const prevMonthKey = mkey(prevD.getFullYear(), prevD.getMonth());
   const cmRow = series.find((s) => s.key === curMonthKey);
   const pmRow = series.find((s) => s.key === prevMonthKey);
+  const lyRow = series.find((s) => s.year === now.getFullYear() - 1 && s.mIdx === now.getMonth());
   const thisYear = now.getFullYear();
   const ytd = series.filter((s) => s.year === thisYear && s.mIdx <= now.getMonth()).reduce((a, s) => a + (s.revenue || 0), 0);
   const ytdPrior = series.filter((s) => s.year === thisYear - 1 && s.mIdx <= now.getMonth()).reduce((a, s) => a + (s.revenue || 0), 0);
@@ -594,6 +595,8 @@ function deriveProperty(pid, model) {
     label: `${MONTHS[now.getMonth()]} ${thisYear}`,
     revenue: cmRow ? (cmRow.revenue || 0) : 0,
     prevRevenue: pmRow ? (pmRow.revenue || 0) : null,
+    lyRevenue: lyRow ? (lyRow.revenue || 0) : null,
+    lyLabel: `${MONTHS[now.getMonth()]} ${now.getFullYear() - 1}`,
     nights: cmRow ? (cmRow.nights ?? null) : null,
     occ: cmRow ? (cmRow.occ ?? null) : null,
     adr: cmRow ? (cmRow.adr ?? null) : null,
@@ -654,7 +657,9 @@ function buildKpi(d) {
   return {
     currentMonthRevenue: d.currentMonth.revenue,
     currentMonthLabel: d.currentMonth.label,
-    currentMonthDelta: delta(d.currentMonth.revenue, d.currentMonth.prevRevenue),
+    currentMonthDelta: (d.currentMonth.lyRevenue != null && d.currentMonth.lyRevenue > 0) ? delta(d.currentMonth.revenue, d.currentMonth.lyRevenue) : null,
+    currentMonthLY: d.currentMonth.lyRevenue,
+    currentMonthLYLabel: d.currentMonth.lyLabel,
     ytdRevenue: d.ytd,
     ytdLabel: `${d.ytdYear} YTD`,
     ytdDelta: d.ytdPrior > 0 ? delta(d.ytd, d.ytdPrior) : null,
@@ -971,7 +976,7 @@ function NavItem({ icon, label, active, onClick, color, dot }) {
 /* ---------------- KPI cards ---------------- */
 function KpiRow({ k, accent }) {
   const cards = [
-    { label: "Current Month Revenue", sub: k.currentMonthLabel, icon: <DollarSign size={15} />, val: fmtMoney(k.currentMonthRevenue), dl: k.currentMonthDelta, dlLabel: "MoM" },
+    { label: "Current Month Revenue", sub: k.currentMonthLY != null ? `${k.currentMonthLabel} · LY ${fmtMoney(k.currentMonthLY)}` : k.currentMonthLabel, icon: <DollarSign size={15} />, val: fmtMoney(k.currentMonthRevenue), dl: k.currentMonthDelta, dlLabel: "YoY" },
     { label: "YTD Revenue", sub: k.ytdLabel, icon: <Calendar size={15} />, val: fmtMoney(k.ytdRevenue), dl: k.ytdDelta, dlLabel: "YoY" },
     { label: "Occupancy", sub: k.metricLabel, icon: <Percent size={15} />, val: fmtPct(k.occ), dl: k.occDelta, dlLabel: "MoM" },
     { label: "ADR", sub: k.metricLabel, icon: <BedDouble size={15} />, val: fmtMoney(k.adr), dl: k.adrDelta, dlLabel: "MoM" },
@@ -1019,19 +1024,31 @@ function SectionTitle({ children, sub }) {
 
 /* ---------------- charts ---------------- */
 function YoyChart({ d }) {
+  const [showOcc, setShowOcc] = useState(false);
   if (!d?.yoy?.length || d.priorY == null) return <Empty text="Year-over-year appears once a prior-year file is loaded." />;
+  const data = d.yoy.map((row, i) => ({ ...row, occ: d.byYear?.[d.curY]?.[i]?.occ ?? null }));
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <ComposedChart data={d.yoy} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-        <XAxis dataKey="month" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
-        <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
-        <Legend wrapperStyle={{ fontSize: 12 }} />
-        <Bar dataKey={String(d.priorY)} fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${d.priorY}`} />
-        <Bar dataKey={String(d.curY)} fill={d.meta.color} radius={[4, 4, 0, 0]} name={`${d.curY}`} />
-      </ComposedChart>
-    </ResponsiveContainer>
+    <div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+        <button onClick={() => setShowOcc((s) => !s)} style={{ fontSize: 12, fontWeight: 600, padding: "5px 11px", borderRadius: 7, cursor: "pointer", border: `1px solid ${showOcc ? d.meta.color : C.border}`, background: showOcc ? d.meta.color : "#fff", color: showOcc ? "#fff" : C.sub }}>
+          {showOcc ? "Hide occupancy" : "Show occupancy"}
+        </button>
+      </div>
+      <ResponsiveContainer width="100%" height={260}>
+        <ComposedChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+          <XAxis dataKey="month" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <YAxis yAxisId="rev" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
+          {showOcc && <YAxis yAxisId="occ" orientation="right" domain={[0, 1]} tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => (v * 100).toFixed(0) + "%"} />}
+          <Tooltip formatter={(v, name) => name === "Occupancy" ? fmtPct(v) : fmtMoney(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          <Bar yAxisId="rev" dataKey={String(d.priorY)} fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${d.priorY}`} />
+          <Bar yAxisId="rev" dataKey={String(d.curY)} fill={d.meta.color} radius={[4, 4, 0, 0]} name={`${d.curY}`} />
+          {showOcc && <ReferenceLine yAxisId="occ" y={0.7} stroke={C.bad} strokeDasharray="5 4" strokeWidth={1.5} label={{ value: "70% goal", position: "insideTopRight", fontSize: 10, fill: C.bad }} />}
+          {showOcc && <Line yAxisId="occ" type="monotone" dataKey="occ" name="Occupancy" stroke={C.ink} strokeWidth={2.5} dot={{ r: 2.5, fill: C.ink }} connectNulls />}
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 const STANDARD_CHANNELS = ["Airbnb", "Vrbo", "Expedia", "Booking.com", "Direct"];
@@ -1101,9 +1118,9 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
 
   const kpi = useMemo(() => {
     const now = new Date();
-    let cmRev = 0, ytdRev = 0, ytdPrior = 0, nights = 0, avail = 0, adrW = 0, adrN = 0, occSum = 0, occN = 0, cmLabel = "", ytdLabel = "";
+    let cmRev = 0, cmLY = 0, ytdRev = 0, ytdPrior = 0, nights = 0, avail = 0, adrW = 0, adrN = 0, occSum = 0, occN = 0, cmLabel = "", ytdLabel = "";
     derived.forEach((d) => {
-      cmRev += d.currentMonth.revenue || 0; ytdRev += d.ytd || 0; ytdPrior += d.ytdPrior || 0;
+      cmRev += d.currentMonth.revenue || 0; cmLY += d.currentMonth.lyRevenue || 0; ytdRev += d.ytd || 0; ytdPrior += d.ytdPrior || 0;
       cmLabel = d.currentMonth.label; ytdLabel = `${d.ytdYear} YTD`;
       const cm = d.currentMonth;
       if (cm && cm.has) {
@@ -1116,7 +1133,8 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
     const occ = avail ? Math.min(1, nights / avail) : (occN ? occSum / occN : null);
     const adr = adrN ? adrW / adrN : null;
     return {
-      currentMonthRevenue: cmRev, currentMonthLabel: cmLabel || "Current month", currentMonthDelta: null,
+      currentMonthRevenue: cmRev, currentMonthLabel: cmLabel || "Current month",
+      currentMonthDelta: cmLY > 0 ? delta(cmRev, cmLY) : null, currentMonthLY: cmLY > 0 ? cmLY : null, currentMonthLYLabel: `${MONTHS[now.getMonth()]} ${now.getFullYear() - 1}`,
       ytdRevenue: ytdRev, ytdLabel: ytdLabel || "YTD", ytdDelta: ytdPrior > 0 ? delta(ytdRev, ytdPrior) : null,
       occ, adr, revpar: adr && occ ? adr * occ : null, metricLabel: cmLabel || "current month",
       occDelta: null, adrDelta: null, revparDelta: null,
@@ -1179,23 +1197,6 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
         </div>
       </div>
       <div style={{ marginTop: 16 }}><Alerts model={model} propIds={propIds} /></div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 16, marginTop: 16 }}>
-        {derived.map((d) => (
-          <div key={d.pid} onClick={() => goto(d.pid)} style={{ cursor: "pointer", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: 18, borderLeft: `4px solid ${d.meta.color}` }}>
-            <div className="ui" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ fontWeight: 700, color: C.ink }}>{d.meta.name}</div>
-              <ChevronRight size={16} style={{ color: C.faint }} />
-            </div>
-            <div className="ui" style={{ fontSize: 11.5, color: C.muted }}>{d.meta.location} · {d.meta.units} units · {d.latest?.label || "—"}</div>
-            <div style={{ display: "flex", gap: 16, marginTop: 12 }}>
-              <Mini label="Rev" val={fmtMoney(d.latest?.revenue)} />
-              <Mini label="Occ" val={fmtPct(d.latest?.occ)} />
-              <Mini label="ADR" val={fmtMoney(d.latest?.adr)} />
-            </div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
