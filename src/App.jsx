@@ -256,9 +256,9 @@ function ingestSheet(rows, ctx) {
         // property name from a "Property" label row, else filename
         let propName = "";
         for (const r of rows) { const arr = r || []; const j = arr.findIndex((c) => norm(c) === "property"); if (j >= 0) { for (let k = j + 1; k < arr.length; k++) { if (String(arr[k] ?? "").trim()) { propName = String(arr[k]).trim(); break; } } if (propName) break; } }
-        const prop = ctx.propOverride || classifyListing(propName) || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename) || "unknown";
+        const prop = ctx.propOverride || classifyListing(propName) || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename);
         const yr = new Date().getFullYear();
-        let curMonth = null;
+        let curMonth = null; const parsed = [];
         for (let i = stayRow + 1; i < rows.length; i++) {
           const r = rows[i]; if (!r) continue;
           const mlabel = norm(r[cStay]).slice(0, 3);
@@ -268,9 +268,15 @@ function ingestSheet(rows, ctx) {
           if (!sn || sn === "-") continue; // subtotal / empty row
           const rev = num(r[cRev]); if (rev == null) continue;
           const rooms = cRooms >= 0 ? (num(r[cRooms]) || 0) : 0;
-          out.push({ kind: "res", prop, month: mkey(yr, curMonth), year: yr, mIdx: curMonth, revenue: rev, nights: rooms, source: sourceLabel(srcRaw) });
+          parsed.push({ month: mkey(yr, curMonth), year: yr, mIdx: curMonth, revenue: rev, nights: rooms, source: sourceLabel(srcRaw) });
         }
-        if (out.length) return out;
+        if (parsed.length) {
+          if (prop) return parsed.map((p) => ({ kind: "res", prop, ...p }));
+          // We read the channel report but it names no property — summarize and ask the user to assign one.
+          const channels = {}; const monthsSet = new Set(); let totalRevenue = 0;
+          parsed.forEach((p) => { channels[p.source] = (channels[p.source] || 0) + p.revenue; monthsSet.add(MONTHS[p.mIdx]); totalRevenue += p.revenue; });
+          return [{ kind: "needprop", report: "channel mix", months: [...monthsSet], totalRevenue, channels }];
+        }
       }
     }
   }
@@ -789,7 +795,7 @@ function Dashboard() {
 
   const handleFiles = useCallback(async (files) => {
     setBusy(true); setIngestMsg(null);
-    let added = 0, errors = [], routed = {};
+    let added = 0, errors = [], routed = {}, prompts = [];
     for (const file of files) {
       try {
         const ext = file.name.split(".").pop().toLowerCase();
@@ -808,6 +814,14 @@ function Dashboard() {
           records = await extractFromImageOrPdf(file);
           if (propOverride !== "auto") records = records.map((r) => ({ ...r, prop: propOverride }));
         } else { errors.push(`${file.name}: unsupported type`); continue; }
+        // a parsed report that couldn't be tied to a property → tell the user what we read and how to assign it
+        const need = records.find((r) => r.kind === "needprop");
+        records = records.filter((r) => r.kind !== "needprop");
+        if (need && !records.length) {
+          const chans = Object.entries(need.channels).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${fmtMoney(v)}`).join(", ");
+          prompts.push(`Read "${file.name}" — a ${need.report} report covering ${need.months.join(", ")}, ${fmtMoney(need.totalRevenue)} total (${chans}) — but it doesn't name a property. Set the "Assign to" dropdown above to the right property and re-upload, or put the property name in the filename (e.g. SOMA, Rambler).`);
+          continue;
+        }
         records.forEach((r) => { if (r.prop && r.prop !== "unknown") routed[r.prop] = (routed[r.prop] || 0) + 1; });
         if (records.length) {
           setModel((m) => {
@@ -822,7 +836,8 @@ function Dashboard() {
     }
     setBusy(false);
     const routedTxt = Object.keys(routed).length ? " → " + Object.keys(routed).map((id) => `${PROP_BY_ID[id]?.name || id} (${routed[id]})`).join(", ") : "";
-    setIngestMsg({ ok: added > 0, text: added ? `Ingested ${added} records${routedTxt}.` : "Nothing ingested. " + errors.join("; "), errors });
+    if (prompts.length && !added) setIngestMsg({ ok: false, text: prompts.join(" "), errors });
+    else setIngestMsg({ ok: added > 0, text: added ? `Ingested ${added} records${routedTxt}.${prompts.length ? " " + prompts.join(" ") : ""}` : "Nothing ingested. " + errors.join("; "), errors });
   }, [propOverride]);
 
   const onDrop = (e) => { e.preventDefault(); if (e.dataTransfer.files?.length) handleFiles([...e.dataTransfer.files]); };
