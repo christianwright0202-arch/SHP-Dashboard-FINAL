@@ -1068,33 +1068,65 @@ function YoyChart({ d }) {
 }
 const STANDARD_CHANNELS = ["Airbnb", "Vrbo", "Expedia", "Booking.com", "Direct"];
 function OtaChart({ d }) {
-  const map = {}; (d?.ota || []).forEach((o) => { map[o.name] = (map[o.name] || 0) + o.value; });
+  const obm = d?.otaByMonth || {};
+  const monthKeys = Object.keys(obm).filter((k) => Object.values(obm[k] || {}).some((v) => v > 0)).sort();
+  const now = new Date(); const curKey = mkey(now.getFullYear(), now.getMonth());
+  const mLabel = (k) => { const [y, m] = k.split("-").map(Number); return `${MONTHS[m - 1]} ${y}`; };
+  const defScope = monthKeys.includes(curKey) ? curKey : (monthKeys.length ? monthKeys[monthKeys.length - 1] : "all");
+  const [scope, setScope] = useState(defScope);
+  useEffect(() => { setScope(defScope); }, [defScope]);
+  const accent = d?.meta?.color || C.ink;
+
+  const map = {};
+  if (scope === "all") { (d?.ota || []).forEach((o) => { map[o.name] = (map[o.name] || 0) + o.value; }); }
+  else { Object.entries(obm[scope] || {}).forEach(([k, v]) => { map[k] = (map[k] || 0) + v; }); }
   const total = Object.values(map).reduce((a, v) => a + v, 0);
-  // always show all five standard channels (plus any extras like "Other"), even at $0
   const names = [...STANDARD_CHANNELS, ...Object.keys(map).filter((n) => !STANDARD_CHANNELS.includes(n))];
   const rows = names.map((name) => ({ name, value: map[name] || 0 }));
   const pieData = rows.filter((r) => r.value > 0);
-  if (!total) return <Empty text="Channel mix appears once channel/reservation data (with a source column) is loaded. All five channels will populate here." />;
+
+  const hasAnyMonth = monthKeys.length > 0;
+  const selector = (
+    <div className="ui" style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+      <button onClick={() => setScope(monthKeys.includes(curKey) ? curKey : defScope)} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${scope !== "all" ? accent : C.border}`, background: scope !== "all" ? accent : "#fff", color: scope !== "all" ? "#fff" : C.sub }}>By month</button>
+      <button onClick={() => setScope("all")} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${scope === "all" ? accent : C.border}`, background: scope === "all" ? accent : "#fff", color: scope === "all" ? "#fff" : C.sub }}>All time</button>
+      {scope !== "all" && hasAnyMonth && (
+        <select value={scope} onChange={(e) => setScope(e.target.value)} style={{ fontSize: 12.5, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink, cursor: "pointer" }}>
+          {monthKeys.slice().reverse().map((k) => <option key={k} value={k}>{mLabel(k)}{k === curKey ? " (current)" : ""}</option>)}
+        </select>
+      )}
+      <span style={{ fontSize: 12, color: C.muted, marginLeft: "auto" }}>{scope === "all" ? "All time" : `${mLabel(scope)} — on the books`} · {fmtMoney(total)}</span>
+    </div>
+  );
+
+  if (!hasAnyMonth && !total) return <Empty text="Channel mix appears once channel/reservation data (with a source column) is loaded. All five channels will populate here." />;
   return (
-    <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-      <ResponsiveContainer width={200} height={200}>
-        <PieChart>
-          <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={52} outerRadius={86} paddingAngle={2}>
-            {pieData.map((o) => <Cell key={o.name} fill={OTA_COLORS[o.name] || OTA_COLORS.Other} />)}
-          </Pie>
-          <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
-        </PieChart>
-      </ResponsiveContainer>
-      <div className="ui" style={{ flex: 1, minWidth: 160 }}>
-        {rows.sort((a, b) => b.value - a.value).map((o) => (
-          <div key={o.name} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", fontSize: 13, borderBottom: `1px solid ${C.track}`, opacity: o.value ? 1 : 0.5 }}>
-            <span style={{ width: 11, height: 11, borderRadius: 3, background: OTA_COLORS[o.name] || OTA_COLORS.Other }} />
-            <span style={{ flex: 1, color: C.ink }}>{o.name}</span>
-            <span style={{ fontWeight: 600 }}>{fmtMoney(o.value)}</span>
-            <span style={{ color: C.muted, width: 44, textAlign: "right" }}>{total ? ((o.value / total) * 100).toFixed(0) : 0}%</span>
+    <div>
+      {selector}
+      {!total ? (
+        <Empty text={`No channel bookings on the books for ${scope === "all" ? "any period" : mLabel(scope)} yet. Switch the period above.`} />
+      ) : (
+        <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <ResponsiveContainer width={200} height={200}>
+            <PieChart>
+              <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={52} outerRadius={86} paddingAngle={2}>
+                {pieData.map((o) => <Cell key={o.name} fill={OTA_COLORS[o.name] || OTA_COLORS.Other} />)}
+              </Pie>
+              <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+            </PieChart>
+          </ResponsiveContainer>
+          <div className="ui" style={{ flex: 1, minWidth: 160 }}>
+            {rows.sort((a, b) => b.value - a.value).map((o) => (
+              <div key={o.name} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", fontSize: 13, borderBottom: `1px solid ${C.track}`, opacity: o.value ? 1 : 0.5 }}>
+                <span style={{ width: 11, height: 11, borderRadius: 3, background: OTA_COLORS[o.name] || OTA_COLORS.Other }} />
+                <span style={{ flex: 1, color: C.ink }}>{o.name}</span>
+                <span style={{ fontWeight: 600 }}>{fmtMoney(o.value)}</span>
+                <span style={{ color: C.muted, width: 44, textAlign: "right" }}>{total ? ((o.value / total) * 100).toFixed(0) : 0}%</span>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1162,6 +1194,11 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
     derived.forEach((d) => { (d.ota || []).forEach((o) => { totals[o.name] = (totals[o.name] || 0) + o.value; }); });
     return Object.entries(totals).map(([name, value]) => ({ name, value }));
   }, [derived]);
+  const portfolioOtaByMonth = useMemo(() => {
+    const out = {};
+    derived.forEach((d) => { const obm = d.otaByMonth || {}; for (const mk of Object.keys(obm)) { const dst = (out[mk] = out[mk] || {}); for (const [src, v] of Object.entries(obm[mk] || {})) dst[src] = (dst[src] || 0) + v; } });
+    return out;
+  }, [derived]);
 
   return (
     <div>
@@ -1191,7 +1228,7 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
             </ResponsiveContainer>
           ) : <Empty text="Load data to compare properties." />}
         </Panel>
-        <Panel title={channelTitle}><OtaChart d={{ ota: portfolioOta }} /></Panel>
+        <Panel title={channelTitle}><OtaChart d={{ ota: portfolioOta, otaByMonth: portfolioOtaByMonth, meta: { color: accent } }} /></Panel>
       </div>
 
       <div style={{ marginTop: 16 }}><PacePanel derived={derived} title="Pace & pickup — booked nights vs. same time last year" /></div>
