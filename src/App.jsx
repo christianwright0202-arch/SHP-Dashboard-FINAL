@@ -36,14 +36,14 @@ const REGIONS = [
 ];
 const PROPERTIES = [
   // Fort Worth
-  { id: "soma", name: "Hotel SOMA", short: "SOMA", color: "#e07b1f", location: "Fort Worth", units: 31, market: "fortworth", goal: 100000, match: /soma/i },
-  { id: "kress", name: "Kress", short: "Kress", color: "#1f7a4d", location: "Fort Worth", units: 7, market: "fortworth", goal: 45000, match: /kress/i },
-  { id: "harley", name: "Harley", short: "Harley", color: "#6a3da8", location: "Fort Worth", units: 3, market: "fortworth", goal: 30000, match: /harley/i },
+  { id: "soma", name: "Hotel SOMA", short: "SOMA", color: "#e07b1f", location: "Fort Worth", units: 35, market: "fortworth", goal: 100000, match: /soma/i, compareMode: "mom" },
+  { id: "kress", name: "Kress", short: "Kress", color: "#1f7a4d", location: "Fort Worth", units: 7, market: "fortworth", goal: 45000, match: /kress/i, compareMode: "yoy" },
+  { id: "harley", name: "Harley", short: "Harley", color: "#6a3da8", location: "Fort Worth", units: 3, market: "fortworth", goal: 30000, match: /harley/i, compareMode: "yoy" },
   // Arlington
-  { id: "rambler", name: "The Rambler Inn", short: "Rambler", color: "#cf3a3a", location: "Arlington", units: 22, market: "arlington", goal: 100000, match: /rambler/i },
-  { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 18, market: "arlington", goal: 60000, match: /(ballpark|ryan)/i },
-  { id: "woodbrook", name: "Woodbrook", short: "Woodbrook", color: "#138a8a", location: "Arlington", units: 1, market: "arlington", goal: 8000, match: /woodbrook/i },
-  { id: "rogers", name: "Rogers", short: "Rogers", color: "#b5651d", location: "Arlington", units: 2, market: "arlington", goal: 16000, match: /rogers/i },
+  { id: "rambler", name: "The Rambler Inn", short: "Rambler", color: "#cf3a3a", location: "Arlington", units: 22, market: "arlington", goal: 100000, match: /rambler/i, compareMode: "yoy" },
+  { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 18, market: "arlington", goal: 60000, match: /(ballpark|ryan)/i, compareMode: "yoy" },
+  { id: "woodbrook", name: "Woodbrook", short: "Woodbrook", color: "#138a8a", location: "Arlington", units: 1, market: "arlington", goal: 8000, match: /woodbrook/i, compareMode: "mom" },
+  { id: "rogers", name: "Rogers", short: "Rogers", color: "#b5651d", location: "Arlington", units: 2, market: "arlington", goal: 16000, match: /rogers/i, compareMode: "mom" },
 ];
 // Default OTA commission rates for net-of-fee view (editable assumption)
 const CHANNEL_FEES = { Airbnb: 0.15, Vrbo: 0.08, Expedia: 0.17, "Booking.com": 0.15, Direct: 0, Other: 0.12 };
@@ -299,8 +299,8 @@ function ingestSheet(rows, ctx) {
 
   // 1) RESERVATION-LEVEL (one row per booking)
   if (hasSource && hasCheckin) {
-    const cSrc = find("source"), cIn = find("check in", "check-in", "checkin"), cList = find("listing");
-    const cNights = find("nights"), cAF = find("af", "accommodation fare", "fare", "revenue"), cADR = find("adr");
+    const cSrc = find("source"), cIn = find("check in", "check-in", "checkin"), cList = find("listing", "property");
+    const cNights = find("nights"), cAF = find("af", "accommodation fare", "fare", "rent", "revenue"), cADR = find("adr");
     for (const r of body) {
       const prop = classifyListing(r[cList]) || ctx.propOverride; if (!prop) continue;
       const d = toDate(r[cIn]); if (!d) continue;
@@ -660,12 +660,17 @@ function healthScore(d) {
 
 // Build the normalized 5-card KPI object for a single property
 function buildKpi(d) {
+  const mode = d.meta.compareMode || (d.priorY != null ? "yoy" : "mom");
+  const cm = d.currentMonth;
+  const useYoy = mode === "yoy" && cm.lyRevenue != null && cm.lyRevenue > 0;
   return {
-    currentMonthRevenue: d.currentMonth.revenue,
-    currentMonthLabel: d.currentMonth.label,
-    currentMonthDelta: (d.currentMonth.lyRevenue != null && d.currentMonth.lyRevenue > 0) ? delta(d.currentMonth.revenue, d.currentMonth.lyRevenue) : null,
-    currentMonthLY: d.currentMonth.lyRevenue,
-    currentMonthLYLabel: d.currentMonth.lyLabel,
+    currentMonthRevenue: cm.revenue,
+    currentMonthLabel: cm.label,
+    compareMode: mode,
+    currentMonthDelta: useYoy ? delta(cm.revenue, cm.lyRevenue) : (cm.prevRevenue != null && cm.prevRevenue > 0 ? delta(cm.revenue, cm.prevRevenue) : null),
+    currentMonthDeltaLabel: useYoy ? "YoY" : "MoM",
+    currentMonthCompareVal: useYoy ? cm.lyRevenue : cm.prevRevenue,
+    currentMonthCompareLabel: useYoy ? cm.lyLabel : "prev mo",
     ytdRevenue: d.ytd,
     ytdLabel: `${d.ytdYear} YTD`,
     ytdDelta: d.ytdPrior > 0 ? delta(d.ytd, d.ytdPrior) : null,
@@ -915,7 +920,6 @@ function Dashboard() {
           <NavItem icon={<TrendingUp size={17} />} label="Ad Performance" active={page === "ads"} onClick={() => setPage("ads")} color="#8ea0b8" />
           <NavItem icon={<MessageSquare size={17} />} label="Ask the Board" active={page === "ask"} onClick={() => setPage("ask")} color="#8ea0b8" />
           <NavItem icon={<Search size={17} />} label="Data Audit" active={page === "audit"} onClick={() => setPage("audit")} color="#8ea0b8" />
-          <NavItem icon={<Briefcase size={17} />} label="Sales Pipeline" active={page === "sales"} onClick={() => setPage("sales")} color="#8ea0b8" />
 
           <div style={{ marginTop: 24, padding: "0 8px" }}>
             <div style={{ fontSize: 10, color: "#6c7d96" }}>
@@ -968,7 +972,6 @@ function Dashboard() {
                   : page === "ask" ? <AskPage model={model} />
                     : page === "audit" ? <AuditPage model={model} setModel={setModel} />
                     : page === "ads" ? <AdPage model={model} />
-                    : page === "sales" ? <SalesPipeline model={model} setModel={setModel} />
                     : <PropertyPage pid={page} model={model} setModel={setModel} />}
           </div>
         </main>
@@ -991,7 +994,7 @@ function NavItem({ icon, label, active, onClick, color, dot }) {
 /* ---------------- KPI cards ---------------- */
 function KpiRow({ k, accent }) {
   const cards = [
-    { label: "Current Month Revenue", sub: k.currentMonthLY != null ? `${k.currentMonthLabel} · LY ${fmtMoney(k.currentMonthLY)}` : k.currentMonthLabel, icon: <DollarSign size={15} />, val: fmtMoney(k.currentMonthRevenue), dl: k.currentMonthDelta, dlLabel: "YoY" },
+    { label: "Current Month Revenue", sub: k.currentMonthCompareVal != null ? `${k.currentMonthLabel} · ${k.currentMonthCompareLabel} ${fmtMoney(k.currentMonthCompareVal)}` : k.currentMonthLabel, icon: <DollarSign size={15} />, val: fmtMoney(k.currentMonthRevenue), dl: k.currentMonthDelta, dlLabel: k.currentMonthDeltaLabel },
     { label: "YTD Revenue", sub: k.ytdLabel, icon: <Calendar size={15} />, val: fmtMoney(k.ytdRevenue), dl: k.ytdDelta, dlLabel: "YoY" },
     { label: "Occupancy", sub: k.metricLabel, icon: <Percent size={15} />, val: fmtPct(k.occ), dl: k.occDelta, dlLabel: "MoM" },
     { label: "ADR", sub: k.metricLabel, icon: <BedDouble size={15} />, val: fmtMoney(k.adr), dl: k.adrDelta, dlLabel: "MoM" },
@@ -1038,14 +1041,46 @@ function SectionTitle({ children, sub }) {
 }
 
 /* ---------------- charts ---------------- */
-function YoyChart({ d }) {
+function RevenueChart({ d }) {
   const [showOcc, setShowOcc] = useState(false);
-  if (!d?.yoy?.length || d.priorY == null) return <Empty text="Year-over-year appears once a prior-year file is loaded." />;
-  const data = d.yoy.map((row, i) => ({ ...row, occ: d.byYear?.[d.curY]?.[i]?.occ ?? null }));
+  const mode = d.meta.compareMode || (d.priorY != null ? "yoy" : "mom");
+  const now = new Date();
+  const cur = d.curY;
+  const curMonths = (cur != null && d.byYear?.[cur]) ? d.byYear[cur] : {};
+  const priorMonths = (mode === "yoy" && d.priorY != null && d.byYear?.[d.priorY]) ? d.byYear[d.priorY] : {};
+  // months that actually have data this year
+  const idxs = MONTHS.map((_, i) => i).filter((i) => curMonths[i] || priorMonths[i]);
+  if (!idxs.length) return <Empty text="Revenue by month appears once a monthly or RevPAR report is loaded." />;
+  const defIdx = idxs.includes(now.getMonth()) ? now.getMonth() : idxs[idxs.length - 1];
+  const [focus, setFocus] = useState(defIdx);
+  useEffect(() => { setFocus(defIdx); }, [defIdx]);
+
+  const data = idxs.map((i) => ({
+    month: MONTHS[i],
+    cur: curMonths[i]?.revenue ?? null,
+    prior: priorMonths[i]?.revenue ?? null,
+    occ: curMonths[i]?.occ ?? null,
+  }));
+  // headline comparison for the focused month
+  const fCur = curMonths[focus]?.revenue ?? null;
+  let cmpVal, cmpLabel;
+  if (mode === "yoy") { cmpVal = priorMonths[focus]?.revenue ?? null; cmpLabel = `${MONTHS[focus]} ${d.priorY}`; }
+  else { const p = curMonths[focus - 1]?.revenue ?? null; cmpVal = p; cmpLabel = focus > 0 ? `${MONTHS[focus - 1]} ${cur}` : "prev mo"; }
+  const dl = (cmpVal != null && cmpVal > 0 && fCur != null) ? (fCur - cmpVal) / cmpVal : null;
+  const accent = d.meta.color;
+
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
-        <button onClick={() => setShowOcc((s) => !s)} style={{ fontSize: 12, fontWeight: 600, padding: "5px 11px", borderRadius: 7, cursor: "pointer", border: `1px solid ${showOcc ? d.meta.color : C.border}`, background: showOcc ? d.meta.color : "#fff", color: showOcc ? "#fff" : C.sub }}>
+      <div className="ui" style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+        <select value={focus} onChange={(e) => setFocus(+e.target.value)} style={{ fontSize: 12.5, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink, cursor: "pointer" }}>
+          {idxs.slice().reverse().map((i) => <option key={i} value={i}>{MONTHS[i]} {cur}{i === now.getMonth() ? " (current)" : ""}</option>)}
+        </select>
+        <span style={{ fontSize: 13 }}>
+          <b>{fCur != null ? fmtMoney(fCur) : "—"}</b>
+          <span style={{ color: C.muted }}> vs {cmpLabel} {cmpVal != null ? fmtMoney(cmpVal) : "—"}</span>
+          {dl != null && <b style={{ marginLeft: 6, color: dl >= 0 ? C.good : C.bad }}>{dl >= 0 ? "+" : ""}{(dl * 100).toFixed(0)}% {mode === "yoy" ? "YoY" : "MoM"}</b>}
+        </span>
+        <button onClick={() => setShowOcc((s) => !s)} style={{ marginLeft: "auto", fontSize: 12, fontWeight: 600, padding: "5px 11px", borderRadius: 7, cursor: "pointer", border: `1px solid ${showOcc ? accent : C.border}`, background: showOcc ? accent : "#fff", color: showOcc ? "#fff" : C.sub }}>
           {showOcc ? "Hide occupancy" : "Show occupancy"}
         </button>
       </div>
@@ -1057,8 +1092,8 @@ function YoyChart({ d }) {
           {showOcc && <YAxis yAxisId="occ" orientation="right" domain={[0, 1]} tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => (v * 100).toFixed(0) + "%"} />}
           <Tooltip formatter={(v, name) => name === "Occupancy" ? fmtPct(v) : fmtMoney(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Bar yAxisId="rev" dataKey={String(d.priorY)} fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${d.priorY}`} />
-          <Bar yAxisId="rev" dataKey={String(d.curY)} fill={d.meta.color} radius={[4, 4, 0, 0]} name={`${d.curY}`} />
+          {mode === "yoy" && <Bar yAxisId="rev" dataKey="prior" fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${d.priorY}`} />}
+          <Bar yAxisId="rev" dataKey="cur" fill={accent} radius={[4, 4, 0, 0]} name={`${cur}`} />
           {showOcc && <ReferenceLine yAxisId="occ" y={0.7} stroke={C.bad} strokeDasharray="5 4" strokeWidth={1.5} label={{ value: "70% goal", position: "insideTopRight", fontSize: 10, fill: C.bad }} />}
           {showOcc && <Line yAxisId="occ" type="monotone" dataKey="occ" name="Occupancy" stroke={C.ink} strokeWidth={2.5} dot={{ r: 2.5, fill: C.ink }} connectNulls />}
         </ComposedChart>
@@ -1249,6 +1284,7 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
         </div>
       </div>
       <div style={{ marginTop: 16 }}><Alerts model={model} propIds={propIds} /></div>
+      <div style={{ marginTop: 16 }}><AnnualBoard derived={derived} goto={goto} /></div>
     </div>
   );
 }
@@ -1525,6 +1561,85 @@ function GoalTracker({ d, model, setModel }) {
 
 
 /* ---------------- PROPERTY PAGE ---------------- */
+/* ---------------- ANNUAL REPORT SUMMARY (from listing-level annual export) ---------------- */
+function annualFromSnap(s) {
+  if (!s || !s.revenue) return null;
+  return {
+    year: s.year,
+    revenue: s.revenue,
+    revenueLY: s.revenueLY || 0,
+    occ: s.occN ? s.occSum / s.occN : null,
+    adr: s.adrN ? s.adrSum / s.adrN : null,
+    revpar: s.revparN ? s.revparSum / s.revparN : null,
+    yoy: s.revenueLY > 0 ? (s.revenue - s.revenueLY) / s.revenueLY : null,
+  };
+}
+function AnnualSummary({ d }) {
+  const a = annualFromSnap(d.snap);
+  if (!a) return null;
+  return (
+    <Panel title={`Annual report — ${a.year}`} right={a.yoy != null ? <span className="ui" style={{ fontSize: 13, fontWeight: 700, color: a.yoy >= 0 ? C.good : C.bad, display: "flex", alignItems: "center", gap: 4 }}>{a.yoy >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />}{(a.yoy * 100).toFixed(1)}% YoY</span> : null}>
+      <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+        <Mini label={`Revenue ${a.year}`} val={fmtMoney(a.revenue)} />
+        <Mini label={`Revenue ${a.year - 1}`} val={a.revenueLY ? fmtMoney(a.revenueLY) : "—"} />
+        <Mini label="Occupancy" val={a.occ != null ? fmtPct(a.occ) : "—"} />
+        <Mini label="ADR" val={a.adr != null ? fmtMoney(a.adr) : "—"} />
+        <Mini label="RevPAR" val={a.revpar != null ? fmtMoney(a.revpar) : "—"} />
+      </div>
+      <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 12 }}>From the uploaded annual report. This covers the report's full annual window and is tracked separately from the month-by-month figures above; occupancy, ADR and RevPAR are averaged across this property's listings.</div>
+    </Panel>
+  );
+}
+function AnnualBoard({ derived, goto }) {
+  const rows = derived.map((d) => ({ d, a: annualFromSnap(d.snap) })).filter((r) => r.a);
+  if (!rows.length) return null;
+  rows.sort((x, y) => y.a.revenue - x.a.revenue);
+  const year = rows[0].a.year;
+  const tot = rows.reduce((s, r) => s + r.a.revenue, 0);
+  const totLY = rows.reduce((s, r) => s + (r.a.revenueLY || 0), 0);
+  const totYoY = totLY > 0 ? (tot - totLY) / totLY : null;
+  return (
+    <Panel title={`Annual report summary — ${year}`}>
+      <div style={{ overflowX: "auto" }}>
+        <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, whiteSpace: "nowrap" }}>
+          <thead>
+            <tr style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .3, textAlign: "right" }}>
+              <th style={{ padding: "7px 9px", textAlign: "left", borderBottom: `2px solid ${C.border}` }}>Property</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Revenue {year}</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Revenue {year - 1}</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>YoY</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Occ</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>ADR</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>RevPAR</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ d, a }) => (
+              <tr key={d.pid} onClick={() => goto && goto(d.pid)} style={{ borderBottom: `1px solid ${C.track}`, textAlign: "right", cursor: goto ? "pointer" : "default" }}>
+                <td style={{ padding: "7px 9px", textAlign: "left", fontWeight: 600 }}><span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 3, background: d.meta.color, marginRight: 7 }} />{d.meta.name}</td>
+                <td style={{ padding: "7px 9px", fontWeight: 600 }}>{fmtMoney(a.revenue)}</td>
+                <td style={{ padding: "7px 9px", color: C.muted }}>{a.revenueLY ? fmtMoney(a.revenueLY) : "—"}</td>
+                <td style={{ padding: "7px 9px", fontWeight: 600, color: a.yoy == null ? C.faint : a.yoy >= 0 ? C.good : C.bad }}>{a.yoy == null ? "—" : `${a.yoy >= 0 ? "+" : ""}${(a.yoy * 100).toFixed(0)}%`}</td>
+                <td style={{ padding: "7px 9px" }}>{a.occ != null ? fmtPct(a.occ) : "—"}</td>
+                <td style={{ padding: "7px 9px" }}>{a.adr != null ? fmtMoney(a.adr) : "—"}</td>
+                <td style={{ padding: "7px 9px" }}>{a.revpar != null ? fmtMoney(a.revpar) : "—"}</td>
+              </tr>
+            ))}
+            <tr style={{ borderTop: `2px solid ${C.border}`, textAlign: "right", fontWeight: 700 }}>
+              <td style={{ padding: "8px 9px", textAlign: "left" }}>Total</td>
+              <td style={{ padding: "8px 9px" }}>{fmtMoney(tot)}</td>
+              <td style={{ padding: "8px 9px", color: C.muted }}>{totLY ? fmtMoney(totLY) : "—"}</td>
+              <td style={{ padding: "8px 9px", color: totYoY == null ? C.faint : totYoY >= 0 ? C.good : C.bad }}>{totYoY == null ? "—" : `${totYoY >= 0 ? "+" : ""}${(totYoY * 100).toFixed(0)}%`}</td>
+              <td colSpan={3} />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 10 }}>From the uploaded annual report — its window may differ from the month-by-month roll-up, so these totals are kept separate.</div>
+    </Panel>
+  );
+}
+
 function PropertyPage({ pid, model, setModel }) {
   const d = useMemo(() => deriveProperty(pid, model), [pid, model]);
   const meta = PROP_BY_ID[pid];
@@ -1537,12 +1652,13 @@ function PropertyPage({ pid, model, setModel }) {
           <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{meta.location} · {meta.units} units · latest {d.latest?.label || "—"}</div></div>
       </div>
       <KpiRow k={buildKpi(d)} accent={meta.color} />
+      {d.snap && <div style={{ marginTop: 16 }}><AnnualSummary d={d} /></div>}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
         <GoalTracker d={d} model={model} setModel={setModel} />
         <ForecastPanel derived={[d]} />
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
-        <Panel title="Year-over-year revenue"><YoyChart d={d} /></Panel>
+        <Panel title={(meta.compareMode === "yoy") ? "Revenue — year over year by month" : "Revenue by month (month over month)"}><RevenueChart d={d} /></Panel>
         <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
