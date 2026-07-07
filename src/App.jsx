@@ -428,18 +428,19 @@ function applyRecords(model, records) {
   for (const rec of records) {
     if (!rec.prop || rec.prop === "unknown") continue;
     if (rec.kind === "ad") { (adTouch[rec.prop] = adTouch[rec.prop] || new Set()).add(rec.channel + "||" + rec.month); continue; }
-    const t = (touch[rec.prop] = touch[rec.prop] || { months: new Set(), wcDates: new Set(), snapshot: false, pace: false });
+    const t = (touch[rec.prop] = touch[rec.prop] || { months: new Set(), channelMonths: new Set(), wcDates: new Set(), snapshot: false, pace: false });
     if (rec.kind === "listingmonth") { t.months.add(rec.month); if (rec.monthLY) t.months.add(rec.monthLY); }
-    else if (rec.kind === "res" || rec.kind === "monthly") t.months.add(rec.month);
+    else if (rec.kind === "res") t.channelMonths.add(rec.month);
+    else if (rec.kind === "monthly") t.months.add(rec.month);
     else if (rec.kind === "wc") t.wcDates.add(rec.date);
     else if (rec.kind === "pace") t.pace = true;
     else if (rec.kind === "snapshot" && (!rec.month || rec.month.endsWith("-00"))) t.snapshot = true;
-    else if (rec.kind === "monthly") t.months.add(rec.month);
   }
   for (const pid of Object.keys(touch)) {
-    const p = (next.properties[pid] = next.properties[pid] || { monthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
-    p.otaByMonth = p.otaByMonth || {};
-    for (const m of touch[pid].months) { delete p.monthly[m]; delete p.otaByMonth[m]; }
+    const p = (next.properties[pid] = next.properties[pid] || { monthly: {}, channelMonthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
+    p.otaByMonth = p.otaByMonth || {}; p.channelMonthly = p.channelMonthly || {};
+    for (const m of touch[pid].months) { delete p.monthly[m]; }
+    for (const m of touch[pid].channelMonths) { delete p.channelMonthly[m]; delete p.otaByMonth[m]; }
     if (touch[pid].wcDates.size) { p.wc = p.wc || {}; for (const dte of touch[pid].wcDates) delete p.wc[dte]; }
     if (touch[pid].pace) p.pace = null;
     if (touch[pid].snapshot) p.snapshot = null;
@@ -495,13 +496,16 @@ function applyRecords(model, records) {
       if (rec.adr != null) { s.adrSum += rec.adr; s.adrN++; }
       if (rec.revpar != null) { s.revparSum += rec.revpar; s.revparN++; }
     } else {
-      const cur = (p.monthly[rec.month] = p.monthly[rec.month] || { revenue: 0, nights: 0 });
       if (rec.kind === "res") {
+        // Channel-production / reservation data drives channel MIX only — kept out of headline revenue.
+        p.channelMonthly = p.channelMonthly || {};
+        const cur = (p.channelMonthly[rec.month] = p.channelMonthly[rec.month] || { revenue: 0, nights: 0 });
         cur.revenue += rec.revenue; cur.nights += rec.nights || 0;
         const obm = (p.otaByMonth = p.otaByMonth || {});
         const mo = (obm[rec.month] = obm[rec.month] || {});
         mo[rec.source] = (mo[rec.source] || 0) + rec.revenue;
       } else {
+        const cur = (p.monthly[rec.month] = p.monthly[rec.month] || { revenue: 0, nights: 0 });
         cur.revenue = rec.revenue;
         if (rec.nights != null) cur.nights = rec.nights;
         if (rec.revpar != null) cur.revpar = rec.revpar;
@@ -545,10 +549,20 @@ function deriveProperty(pid, model) {
   const p = model.properties[pid];
   const meta = PROP_BY_ID[pid];
   if (!p) return null;
-  const keys = Object.keys(p.monthly).filter((k) => !k.endsWith("-00")).sort();
+  // Headline revenue/nights come from RevPAR or whole-portfolio (p.monthly). Channel-production/STR
+  // reservation data (p.channelMonthly) is ONLY a fallback for months with no headline source — it
+  // must never stack on top of or overwrite the authoritative RevPAR figure.
+  const headline = p.monthly || {};
+  const chan = p.channelMonthly || {};
+  const monthly = {};
+  for (const k of new Set([...Object.keys(headline), ...Object.keys(chan)])) {
+    if (k in headline) monthly[k] = headline[k];      // RevPAR/whole-portfolio is authoritative — even a real $0
+    else monthly[k] = { revenue: chan[k].revenue || 0, nights: chan[k].nights || 0 }; // channel only fills months with no headline source
+  }
+  const keys = Object.keys(monthly).filter((k) => !k.endsWith("-00")).sort();
   const series = keys.map((k) => {
     const [y, m] = k.split("-").map(Number);
-    const d = p.monthly[k];
+    const d = monthly[k];
     const days = daysInMonth(y, m - 1);
     const avail = meta.units * days;
     const occ = d.occ != null ? d.occ : d.nights ? Math.min(1, d.nights / avail) : null;
