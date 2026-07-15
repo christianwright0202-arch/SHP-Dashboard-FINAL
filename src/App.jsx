@@ -8,7 +8,7 @@ import { loadModel, saveModel } from "./storage";
 import {
   Upload, TrendingUp, TrendingDown, AlertTriangle, Calendar, Sparkles,
   LayoutGrid, Building2, MessageSquare, Send, RefreshCw, Trash2, FileText,
-  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target, Search, MapPin, Activity, Trophy, Briefcase, Plus,
+  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target, Search, MapPin, Activity, Trophy, Briefcase, Plus, Eye, Lock,
 } from "lucide-react";
 
 /* ============================================================
@@ -42,9 +42,11 @@ const PROPERTIES = [
   // Arlington
   { id: "rambler", name: "The Rambler Inn", short: "Rambler", color: "#cf3a3a", location: "Arlington", units: 22, market: "arlington", goal: 100000, match: /rambler/i, compareMode: "yoy" },
   { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 18, market: "arlington", goal: 60000, match: /(ballpark|ryan)/i, compareMode: "yoy" },
-  { id: "woodbrook", name: "Woodbrook", short: "Woodbrook", color: "#138a8a", location: "Arlington", units: 1, market: "arlington", goal: 8000, match: /woodbrook/i, compareMode: "mom" },
-  { id: "rogers", name: "Rogers", short: "Rogers", color: "#b5651d", location: "Arlington", units: 2, market: "arlington", goal: 16000, match: /rogers/i, compareMode: "mom" },
+  { id: "woodbrook", name: "Woodbrook", short: "Woodbrook", color: "#138a8a", location: "Arlington", units: 1, market: "arlington", goal: 8000, match: /woodbrook/i, compareMode: "mom", group: "khorrami" },
+  { id: "rogers", name: "Rogers", short: "Rogers", color: "#b5651d", location: "Arlington", units: 2, market: "arlington", goal: 16000, match: /rogers/i, compareMode: "mom", group: "khorrami" },
 ];
+// Khorrami = combined Woodbrook + Rogers view (shown as one Arlington tab with an All/Woodbrook/Rogers toggle)
+const KHORRAMI = { id: "khorrami", name: "Khorrami", short: "Khorrami", color: "#0f766e", location: "Arlington", market: "arlington", members: ["woodbrook", "rogers"], units: 3, compareMode: "mom" };
 // Default OTA commission rates for net-of-fee view (editable assumption)
 const CHANNEL_FEES = { Airbnb: 0.15, Vrbo: 0.08, Expedia: 0.17, "Booking.com": 0.15, Direct: 0, Other: 0.12 };
 const PROPS_IN = (region) => PROPERTIES.filter((p) => p.market === region);
@@ -545,9 +547,9 @@ function buildActivity(before, after, fname) {
 }
 
 /* derive KPIs for a property */
-function deriveProperty(pid, model) {
+function deriveProperty(pid, model, metaOverride) {
   const p = model.properties[pid];
-  const meta = PROP_BY_ID[pid];
+  const meta = metaOverride || PROP_BY_ID[pid];
   if (!p) return null;
   // Headline revenue/nights come from RevPAR or whole-portfolio (p.monthly). Channel-production/STR
   // reservation data (p.channelMonthly) is ONLY a fallback for months with no headline source — it
@@ -642,6 +644,79 @@ function deriveProperty(pid, model) {
 
   return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
 }
+// Combine several properties into one derived object (Khorrami "All", or the whole portfolio).
+// Pools correctly: sums revenue + nights per month, then recomputes occ/ADR/RevPAR against the
+// combined unit count — never averages percentages.
+function deriveCombined(memberIds, model, meta) {
+  // Resolve each member with its OWN best source first (RevPAR or channel fallback), THEN pool.
+  // (Merging raw buckets would let a RevPAR member's month keys hide a channel-only member.)
+  const monthly = {}, otaByMonth = {}, ota = {};
+  memberIds.forEach((mid) => {
+    const dm = deriveProperty(mid, model); if (!dm) return;
+    dm.series.forEach((s) => { const cur = (monthly[s.key] = monthly[s.key] || { revenue: 0, nights: 0 }); cur.revenue += s.revenue || 0; cur.nights += s.nights || 0; });
+    for (const [mk, srcs] of Object.entries(dm.otaByMonth || {})) { const dst = (otaByMonth[mk] = otaByMonth[mk] || {}); for (const [s, v] of Object.entries(srcs)) dst[s] = (dst[s] || 0) + v; }
+    (dm.ota || []).forEach((o) => { ota[o.name] = (ota[o.name] || 0) + o.value; });
+  });
+  const merged = { monthly, channelMonthly: {}, ota, otaByMonth, snapshot: null };
+  const tempModel = { ...model, properties: { ...model.properties, __combined: merged } };
+  return deriveProperty("__combined", tempModel, meta);
+}
+
+// ---- Period + comparison engine (drives the linked squares + bar graph) ----
+const PERIOD_DEFS = [
+  { id: "mtd", label: "This month" },
+  { id: "qtd", label: "This quarter" },
+  { id: "ytd", label: "YTD" },
+  { id: "t12", label: "Last 12 mo" },
+];
+function periodMonthList(periodId, now = new Date()) {
+  const y = now.getFullYear(), m = now.getMonth();
+  const out = [];
+  if (periodId === "mtd") out.push({ year: y, mIdx: m });
+  else if (periodId === "qtd") { const qStart = Math.floor(m / 3) * 3; for (let i = qStart; i <= m; i++) out.push({ year: y, mIdx: i }); }
+  else if (periodId === "ytd") { for (let i = 0; i <= m; i++) out.push({ year: y, mIdx: i }); }
+  else if (periodId === "t12") { for (let i = 11; i >= 0; i--) { const d = new Date(y, m - i, 1); out.push({ year: d.getFullYear(), mIdx: d.getMonth() }); } }
+  return out;
+}
+function shiftMonthsYear(list) { return list.map((x) => ({ year: x.year - 1, mIdx: x.mIdx })); }
+function shiftMonthsPrevPeriod(list) {
+  const n = list.length;
+  return list.map((x) => { const d = new Date(x.year, x.mIdx - n, 1); return { year: d.getFullYear(), mIdx: d.getMonth() }; });
+}
+function poolMonths(d, monthList, metric) {
+  let rev = 0, nights = 0, avail = 0, hasAny = false;
+  monthList.forEach(({ year, mIdx }) => {
+    const s = d.byYear?.[year]?.[mIdx];
+    const days = daysInMonth(year, mIdx);
+    avail += (d.meta.units || 0) * days;
+    if (s) { hasAny = true; rev += s.revenue || 0; nights += s.nights || 0; }
+  });
+  if (!hasAny) return null;
+  if (metric === "revenue") return rev;
+  if (metric === "occ") return avail ? Math.min(1, nights / avail) : null;
+  if (metric === "adr") return nights ? rev / nights : null;
+  if (metric === "revpar") return avail ? rev / avail : null;
+  return null;
+}
+function periodStats(d, periodId, metric, now = new Date()) {
+  const list = periodMonthList(periodId, now);
+  const value = poolMonths(d, list, metric);
+  const yoyList = shiftMonthsYear(list);
+  const momList = shiftMonthsPrevPeriod(list);
+  const ytdYoyList = MONTHS.map((_, i) => ({ year: now.getFullYear() - 1, mIdx: i })); // YTD YoY = vs full prior-year total (pace)
+  const yoyValue = poolMonths(d, periodId === "ytd" ? ytdYoyList : yoyList, metric);
+  const momValue = poolMonths(d, momList, metric);
+  const bars = list.map(({ year, mIdx }) => {
+    const s = d.byYear?.[year]?.[mIdx];
+    const ly = d.byYear?.[year - 1]?.[mIdx];
+    const pmD = new Date(year, mIdx - 1, 1);
+    const pm = d.byYear?.[pmD.getFullYear()]?.[pmD.getMonth()];
+    const val = (row) => row ? (metric === "revenue" ? (row.revenue || 0) : row[metric] ?? null) : null;
+    return { key: `${year}-${String(mIdx + 1).padStart(2, "0")}`, label: `${MONTHS[mIdx]} '${String(year).slice(2)}`, cur: val(s), prevYear: val(ly), prevMonth: val(pm) };
+  });
+  return { value, yoyValue, momValue, bars, list, periodId, label: PERIOD_DEFS.find((p) => p.id === periodId)?.label || "" };
+}
+
 // Aggregate ad spend/revenue/ROAS per channel for a property
 function deriveAds(model, pid) {
   const a = model.ads && model.ads[pid];
@@ -799,6 +874,10 @@ function Dashboard() {
   const [busy, setBusy] = useState(false);
   const [propOverride, setPropOverride] = useState("auto");
   const fileRef = useRef(null);
+  // Editor lock: uploading/editing is gated behind an editor password. Everyone else is view-only.
+  const EDITOR_PW = import.meta.env.VITE_EDITOR_PASSWORD || "";
+  const [canEdit, setCanEdit] = useState(!EDITOR_PW); // if no editor password is configured, editing is open
+  const alertCount = useMemo(() => buildAlerts(model, PROPERTIES.map((p) => p.id)).filter((a) => a.sev === "high").length, [model]);
 
   // persistence
   useEffect(() => {
@@ -808,9 +887,9 @@ function Dashboard() {
     })();
   }, []);
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || !canEdit) return; // view-only users never write to the shared store
     (async () => { try { await saveModel(model); } catch (e) {} })();
-  }, [model, loaded]);
+  }, [model, loaded, canEdit]);
 
   const handleFiles = useCallback(async (files) => {
     setBusy(true); setIngestMsg(null);
@@ -859,7 +938,13 @@ function Dashboard() {
     else setIngestMsg({ ok: added > 0, text: added ? `Ingested ${added} records${routedTxt}.${prompts.length ? " " + prompts.join(" ") : ""}` : "Nothing ingested. " + errors.join("; "), errors });
   }, [propOverride]);
 
-  const onDrop = (e) => { e.preventDefault(); if (e.dataTransfer.files?.length) handleFiles([...e.dataTransfer.files]); };
+  const onDrop = (e) => { e.preventDefault(); if (!canEdit) return; if (e.dataTransfer.files?.length) handleFiles([...e.dataTransfer.files]); };
+  const tryUnlock = () => {
+    const entry = prompt("Enter editor password to unlock uploading & editing:");
+    if (entry == null) return;
+    if (entry === EDITOR_PW) setCanEdit(true);
+    else alert("Incorrect editor password.");
+  };
 
   const runHfDebug = useCallback(async () => {
     setBusy(true);
@@ -915,21 +1000,26 @@ function Dashboard() {
             <div style={{ fontFamily: "Georgia, serif", fontSize: 23, fontWeight: 700, lineHeight: 1.1, marginTop: 4 }}>SHP Reporting<br />Dashboard</div>
           </div>
           <NavItem icon={<LayoutGrid size={17} />} label="Overview" active={page === "overview"} onClick={() => setPage("overview")} color="#8ea0b8" />
-          <NavItem icon={<Trophy size={17} />} label="World Cup" active={page === "worldcup"} onClick={() => setPage("worldcup")} color="#f0b21b" />
           {REGIONS.map((rg) => (
             <div key={rg.id}>
               <button className="navbtn ui" onClick={() => setPage("region:" + rg.id)}
                 style={{ width: "100%", textAlign: "left", background: page === "region:" + rg.id ? "rgba(255,255,255,.10)" : "transparent", color: "#dfe6ef", border: "none", borderRadius: 7, padding: "9px 11px", fontSize: 12, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", cursor: "pointer", display: "flex", alignItems: "center", gap: 8, marginTop: 14, marginBottom: 2 }}>
                 <MapPin size={15} style={{ color: "#8ea0b8" }} /> {rg.name}
               </button>
-              {PROPS_IN(rg.id).map((p) => (
+              {PROPS_IN(rg.id).filter((p) => p.group !== "khorrami").map((p) => (
                 <div key={p.id} style={{ paddingLeft: 12 }}>
                   <NavItem icon={<Building2 size={16} />} label={p.name} active={page === p.id} onClick={() => setPage(p.id)} color={p.color} dot />
                 </div>
               ))}
+              {PROPS_IN(rg.id).some((p) => p.group === "khorrami") && (
+                <div style={{ paddingLeft: 12 }}>
+                  <NavItem icon={<Building2 size={16} />} label="Khorrami" active={page === "khorrami"} onClick={() => setPage("khorrami")} color={KHORRAMI.color} dot />
+                </div>
+              )}
             </div>
           ))}
           <div style={{ fontSize: 10, letterSpacing: 2, color: "#6c7d96", margin: "16px 8px 6px", fontWeight: 700 }}>INTELLIGENCE</div>
+          <NavItem icon={<AlertTriangle size={17} />} label="Alerts" active={page === "alerts"} onClick={() => setPage("alerts")} color="#8ea0b8" notify={alertCount} />
           <NavItem icon={<Calendar size={17} />} label="Events" active={page === "events"} onClick={() => setPage("events")} color="#8ea0b8" />
           <NavItem icon={<TrendingUp size={17} />} label="Ad Performance" active={page === "ads"} onClick={() => setPage("ads")} color="#8ea0b8" />
           <NavItem icon={<MessageSquare size={17} />} label="Ask the Board" active={page === "ask"} onClick={() => setPage("ask")} color="#8ea0b8" />
@@ -939,8 +1029,8 @@ function Dashboard() {
             <div style={{ fontSize: 10, color: "#6c7d96" }}>
               {model.lastUpdated ? "Updated " + new Date(model.lastUpdated).toLocaleString() : "No data yet"}
             </div>
-            {hasData && (
-              <button className="ui navbtn" onClick={() => { if (confirm("Clear all stored data?")) setModel(MODEL); }}
+            {hasData && canEdit && (
+              <button className="ui navbtn" onClick={() => { if (confirm("Clear all stored data? This clears it for everyone.")) setModel(MODEL); }}
                 style={{ marginTop: 10, fontSize: 11, background: "transparent", color: "#9fb0c6", border: `1px solid #3a4a5f`, borderRadius: 7, padding: "5px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
                 <Trash2 size={12} /> Reset data
               </button>
@@ -954,19 +1044,31 @@ function Dashboard() {
           <div className="ui" style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "12px 28px", display: "flex", alignItems: "center", gap: 14, position: "sticky", top: 0, zIndex: 5 }}>
             <input ref={fileRef} type="file" multiple accept=".xlsx,.xls,.csv,.tsv,.png,.jpg,.jpeg,.pdf" style={{ display: "none" }}
               onChange={(e) => { if (e.target.files?.length) handleFiles([...e.target.files]); e.target.value = ""; }} />
-            <button className="navbtn" onClick={() => fileRef.current?.click()} disabled={busy}
-              style={{ background: C.slate, color: "#fff", border: "none", borderRadius: 9, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
-              {busy ? <Loader2 size={15} className="spin" style={{ animation: "spin 1s linear infinite" }} /> : <Upload size={15} />} Upload data
-            </button>
-            <span style={{ fontSize: 12, color: C.muted }}>.xlsx · .csv · .png · .jpg · .pdf — drag & drop anywhere</span>
-            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 11, color: C.muted }}>Assign to:</span>
-              <select value={propOverride} onChange={(e) => setPropOverride(e.target.value)}
-                style={{ fontSize: 12, padding: "6px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink }}>
-                <option value="auto">Auto-detect</option>
-                {PROPERTIES.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </div>
+            {canEdit ? (
+              <>
+                <button className="navbtn" onClick={() => fileRef.current?.click()} disabled={busy}
+                  style={{ background: C.slate, color: "#fff", border: "none", borderRadius: 9, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+                  {busy ? <Loader2 size={15} className="spin" style={{ animation: "spin 1s linear infinite" }} /> : <Upload size={15} />} Upload data
+                </button>
+                <span style={{ fontSize: 12, color: C.muted }}>.xlsx · .csv · .png · .jpg · .pdf — drag & drop anywhere</span>
+                <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 11, color: C.muted }}>Assign to:</span>
+                  <select value={propOverride} onChange={(e) => setPropOverride(e.target.value)}
+                    style={{ fontSize: 12, padding: "6px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink }}>
+                    <option value="auto">Auto-detect</option>
+                    {PROPERTIES.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <>
+                <span style={{ fontSize: 13, color: C.muted, display: "flex", alignItems: "center", gap: 8 }}><Eye size={15} /> View-only — the board updates automatically when the owner uploads new reports.</span>
+                <button className="navbtn" onClick={tryUnlock}
+                  style={{ marginLeft: "auto", background: "transparent", color: C.slate, border: `1px solid ${C.border}`, borderRadius: 9, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+                  <Lock size={14} /> Unlock editing
+                </button>
+              </>
+            )}
             <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
           </div>
 
@@ -980,7 +1082,8 @@ function Dashboard() {
           <div style={{ padding: "26px 28px 60px" }}>
             {!loaded ? <div className="ui" style={{ color: C.muted }}>Loading…</div>
               : page === "overview" ? <Overview model={model} hasData={hasData} onUpload={() => fileRef.current?.click()} goto={setPage} />
-                : page === "worldcup" ? <WorldCupPage model={model} onUpload={() => fileRef.current?.click()} />
+                : page === "khorrami" ? <KhorramiPage model={model} setModel={setModel} />
+                : page === "alerts" ? <AlertsPage model={model} />
                 : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={model} goto={setPage} />
                 : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
                   : page === "ask" ? <AskPage model={model} />
@@ -995,12 +1098,13 @@ function Dashboard() {
 }
 
 /* ---------------- nav ---------------- */
-function NavItem({ icon, label, active, onClick, color, dot }) {
+function NavItem({ icon, label, active, onClick, color, dot, notify }) {
   return (
     <button className="navbtn ui" onClick={onClick}
       style={{ width: "100%", textAlign: "left", background: active ? "rgba(255,255,255,.10)" : "transparent", color: active ? "#fff" : "#c4cfde", border: "none", borderLeft: `3px solid ${active ? color : "transparent"}`, borderRadius: 7, padding: "9px 11px", fontSize: 13.5, fontWeight: active ? 600 : 500, cursor: "pointer", display: "flex", alignItems: "center", gap: 10, marginBottom: 2 }}>
       {dot ? <span style={{ width: 9, height: 9, borderRadius: 9, background: color, flexShrink: 0 }} /> : <span style={{ color }}>{icon}</span>}
       {label}
+      {notify > 0 && <span style={{ marginLeft: "auto", minWidth: 18, height: 18, padding: "0 5px", borderRadius: 9, background: "#e23b3b", color: "#fff", fontSize: 11, fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{notify}</span>}
     </button>
   );
 }
@@ -1208,6 +1312,110 @@ function RegionPage({ region, model, goto }) {
   return <PortfolioView model={model} props={props} title={rg ? rg.name : "Region"} sub={`${props.length} properties in ${rg ? rg.name : region}`} accent={C.slate} goto={goto} hasData channelTitle={`Channel mix — ${rg ? rg.name : region}`} regionMode />;
 }
 
+const METRIC_DEFS = [
+  { id: "revenue", label: "Revenue", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <DollarSign size={15} /> },
+  { id: "occ", label: "Occupancy", fmt: (v) => v == null ? "—" : fmtPct(v), icon: <Percent size={15} /> },
+  { id: "adr", label: "ADR", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <BedDouble size={15} /> },
+  { id: "revpar", label: "RevPAR", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <Gauge size={15} /> },
+];
+// Linked squares + bar graph. Period control drives BOTH. Clicking a square selects the metric the
+// bar graph plots. Independent toggles: YoY/MoM comparison on the squares; prior-year and prior-month
+// paired bars on the graph.
+function MetricsBlock({ d, accent }) {
+  const [period, setPeriod] = useState("mtd");
+  const [metric, setMetric] = useState("revenue");
+  const noPrior = d.priorY == null;
+  const [cmp, setCmp] = useState((d.meta.compareMode === "yoy" && !noPrior) ? "yoy" : "mom");
+  const [showPY, setShowPY] = useState(false);
+  const [showPM, setShowPM] = useState(false);
+  const now = new Date();
+
+  const statsByMetric = {};
+  METRIC_DEFS.forEach((m) => { statsByMetric[m.id] = periodStats(d, period, m.id, now); });
+  const active = statsByMetric[metric];
+  const mDef = METRIC_DEFS.find((m) => m.id === metric);
+
+  const periodTag = PERIOD_DEFS.find((p) => p.id === period)?.label || "";
+  const cmpLabel = (mid) => {
+    const st = statsByMetric[mid];
+    const useYoy = cmp === "yoy" && st.yoyValue != null; // auto-fall back to MoM where no prior year
+    const cmpVal = useYoy ? st.yoyValue : st.momValue;
+    const base = st.value;
+    const dl = (cmpVal != null && cmpVal !== 0 && base != null) ? (base - cmpVal) / Math.abs(cmpVal) : null;
+    const fmt = METRIC_DEFS.find((m) => m.id === mid).fmt;
+    let vsText;
+    if (useYoy) vsText = period === "ytd" ? `${now.getFullYear() - 1} total` : `LY ${fmt(cmpVal)}`;
+    else vsText = period === "mtd" ? `prev mo ${fmt(cmpVal)}` : `prev ${fmt(cmpVal)}`;
+    return { dl, vsText, kind: useYoy ? "YoY" : "MoM" };
+  };
+
+  // bar graph data
+  const barData = active.bars.map((b) => ({ month: b.label, cur: b.cur, prevYear: b.prevYear, prevMonth: b.prevMonth }));
+  const isPct = metric === "occ";
+  const axisFmt = isPct ? (v) => (v * 100).toFixed(0) + "%" : (v) => "$" + (v / 1000).toFixed(0) + "k";
+  const tipFmt = (v) => v == null ? "—" : (isPct ? fmtPct(v) : fmtMoney(v));
+
+  const pill = (oncl, on, label, key) => (
+    <button key={key} onClick={oncl} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${on ? accent : C.border}`, background: on ? accent : "#fff", color: on ? "#fff" : C.sub }}>{label}</button>
+  );
+
+  return (
+    <div>
+      {/* period control (shared) */}
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+        {PERIOD_DEFS.map((p) => pill(() => setPeriod(p.id), period === p.id, p.label, p.id))}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontSize: 11.5, color: C.muted }}>Compare:</span>
+          {pill(() => setCmp("yoy"), cmp === "yoy", "YoY", "cyoy")}
+          {pill(() => setCmp("mom"), cmp === "mom", "MoM", "cmom")}
+        </div>
+      </div>
+
+      {/* squares — click to drive the bar graph */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 16 }}>
+        {METRIC_DEFS.map((m) => {
+          const st = statsByMetric[m.id];
+          const c = cmpLabel(m.id);
+          const selected = metric === m.id;
+          return (
+            <button key={m.id} onClick={() => setMetric(m.id)} style={{ textAlign: "left", cursor: "pointer", background: C.panel, border: `1px solid ${selected ? accent : C.border}`, borderRadius: 14, padding: "16px 16px 14px", boxShadow: selected ? `0 0 0 1px ${accent}` : "none" }}>
+              <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .5 }}>{m.icon}{m.label}</div>
+              <div style={{ fontFamily: "Georgia,serif", fontSize: 26, fontWeight: 700, marginTop: 6 }}>{m.fmt(st.value)}</div>
+              <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 3 }}>{periodTag}</div>
+              <div className="ui" style={{ fontSize: 12, marginTop: 4 }}>
+                {c.dl != null ? <span style={{ color: c.dl >= 0 ? C.good : C.bad, fontWeight: 700 }}>{c.dl >= 0 ? "▲" : "▼"} {Math.abs(c.dl * 100).toFixed(1)}% {c.kind}</span> : <span style={{ color: C.faint }}>— {c.kind}</span>}
+                <span style={{ color: C.muted }}> · {c.vsText}</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* linked bar graph */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 700, color: C.ink, fontSize: 14 }}>{mDef.label} by month · {periodTag}</div>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          {pill(() => setShowPY((s) => !s), showPY, "Last year", "py")}
+          {pill(() => setShowPM((s) => !s), showPM, "Last month", "pm")}
+        </div>
+      </div>
+      <ResponsiveContainer width="100%" height={270}>
+        <ComposedChart data={barData} margin={{ top: 6, right: 8, left: -6, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+          <XAxis dataKey="month" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={axisFmt} domain={isPct ? [0, 1] : undefined} />
+          <Tooltip formatter={(v) => tipFmt(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          {showPM && <Bar dataKey="prevMonth" fill="#b8c0cc" radius={[4, 4, 0, 0]} name="Prev month" />}
+          {showPY && <Bar dataKey="prevYear" fill="#c9d0da" radius={[4, 4, 0, 0]} name="Last year" />}
+          <Bar dataKey="cur" fill={accent} radius={[4, 4, 0, 0]} name={mDef.label} />
+          {isPct && <ReferenceLine y={0.7} stroke={C.bad} strokeDasharray="5 4" strokeWidth={1.5} label={{ value: "70% goal", position: "insideTopRight", fontSize: 10, fill: C.bad }} />}
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUpload, channelTitle, regionMode }) {
   const propIds = props.map((p) => p.id);
   const derived = useMemo(() => props.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model, propIds.join()]);
@@ -1249,6 +1457,8 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
     return out;
   }, [derived]);
 
+  const portfolioDerived = useMemo(() => deriveCombined(propIds, model, { units: props.reduce((a, p) => a + (p.units || 0), 0), color: accent, compareMode: "yoy", name: title }), [model, propIds.join(), accent]);
+
   return (
     <div>
       <SectionTitle sub={sub}>{title}</SectionTitle>
@@ -1260,8 +1470,7 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
         </div>
       )}
 
-      <KpiRow k={kpi} accent={accent} />
-      <PeriodBreakdown derived={derived} accent={accent} />
+      <MetricsBlock d={portfolioDerived} accent={accent} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
         <Panel title="Revenue by property — current month">
@@ -1288,7 +1497,6 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
       </div>
 
       <div style={{ marginTop: 16 }}><ChannelOverTime derived={derived} /></div>
-      <div style={{ marginTop: 16 }}><HealthBoard derived={derived} goto={goto} /></div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16, marginTop: 16 }}>
         <div><DailyFocus model={model} propIds={propIds} /></div>
@@ -1297,7 +1505,6 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
           <SlackDigest model={model} propIds={propIds} />
         </div>
       </div>
-      <div style={{ marginTop: 16 }}><Alerts model={model} propIds={propIds} /></div>
       <div style={{ marginTop: 16 }}><AnnualBoard derived={derived} goto={goto} /></div>
     </div>
   );
@@ -1665,27 +1872,63 @@ function PropertyPage({ pid, model, setModel }) {
         <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>{meta.name}</h1>
           <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{meta.location} · {meta.units} units · latest {d.latest?.label || "—"}</div></div>
       </div>
-      <KpiRow k={buildKpi(d)} accent={meta.color} />
+      <MetricsBlock d={d} accent={meta.color} />
       {d.snap && <div style={{ marginTop: 16 }}><AnnualSummary d={d} /></div>}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
         <GoalTracker d={d} model={model} setModel={setModel} />
         <ForecastPanel derived={[d]} />
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
-        <Panel title={(meta.compareMode === "yoy") ? "Revenue — year over year by month" : "Revenue by month (month over month)"}><RevenueChart d={d} /></Panel>
+        <Panel title="Revenue trend"><TrendChart series={d.series} dataKey="revenue" color={meta.color} fmt={(v) => "$" + (v / 1000).toFixed(0) + "k"} /></Panel>
         <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
-        <Panel title="Revenue trend"><TrendChart series={d.series} dataKey="revenue" color={meta.color} fmt={(v) => "$" + (v / 1000).toFixed(0) + "k"} /></Panel>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginTop: 16 }}>
         <Panel title="Occupancy trend"><TrendChart series={d.series} dataKey="occ" color={meta.color} fmt={(v) => (v * 100).toFixed(0) + "%"} /></Panel>
         <Panel title="ADR trend"><TrendChart series={d.series} dataKey="adr" color={meta.color} fmt={(v) => "$" + v.toFixed(0)} /></Panel>
         <Panel title="RevPAR trend"><TrendChart series={d.series} dataKey="revpar" color={meta.color} fmt={(v) => "$" + v.toFixed(0)} /></Panel>
       </div>
+      <div style={{ marginTop: 16 }}><HealthBoard derived={[d]} goto={() => {}} title="Property health" /></div>
       <div style={{ marginTop: 16 }}><PacePanel derived={[d]} title="Pace & pickup" /></div>
       <div style={{ marginTop: 16 }}><ChannelOverTime derived={[d]} /></div>
       {deriveAds(model, pid) && <div style={{ marginTop: 16 }}><AdPanel ads={deriveAds(model, pid)} color={meta.color} /></div>}
       <div style={{ marginTop: 16 }}><YoyReport d={d} /></div>
       <div style={{ marginTop: 16 }}><PropertyAdvisor d={d} /></div>
+    </div>
+  );
+}
+
+function KhorramiPage({ model, setModel }) {
+  const [scope, setScope] = useState("all");
+  const members = KHORRAMI.members;
+  const d = useMemo(() => {
+    if (scope === "all") return deriveCombined(members, model, { ...KHORRAMI });
+    return deriveProperty(scope, model);
+  }, [scope, model]);
+  const meta = scope === "all" ? KHORRAMI : PROP_BY_ID[scope];
+  const scopes = [{ id: "all", name: "All (combined)" }, { id: "woodbrook", name: "Woodbrook" }, { id: "rogers", name: "Rogers" }];
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+        <span style={{ width: 16, height: 16, borderRadius: 5, background: KHORRAMI.color }} />
+        <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>Khorrami</h1>
+          <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{KHORRAMI.location} · Woodbrook + Rogers · {KHORRAMI.units} units combined</div></div>
+      </div>
+      <div style={{ display: "flex", gap: 7, marginBottom: 16 }}>
+        {scopes.map((s) => (
+          <button key={s.id} onClick={() => setScope(s.id)} style={{ fontSize: 12.5, fontWeight: 600, padding: "6px 13px", borderRadius: 8, cursor: "pointer", border: `1px solid ${scope === s.id ? meta.color : C.border}`, background: scope === s.id ? meta.color : "#fff", color: scope === s.id ? "#fff" : C.sub }}>{s.name}</button>
+        ))}
+      </div>
+      {!d ? <Panel title="No data"><Empty text="Upload Woodbrook or Rogers data to populate this page." /></Panel> : (
+        <>
+          <MetricsBlock d={d} accent={meta.color} />
+          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
+            <Panel title="Revenue trend"><TrendChart series={d.series} dataKey="revenue" color={meta.color} fmt={(v) => "$" + (v / 1000).toFixed(0) + "k"} /></Panel>
+            <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
+          </div>
+          <div style={{ marginTop: 16 }}><HealthBoard derived={[d]} goto={() => {}} title="Property health" /></div>
+          <div style={{ marginTop: 16 }}><YoyReport d={d} /></div>
+        </>
+      )}
     </div>
   );
 }
@@ -1853,20 +2096,21 @@ function DailyFocus({ model, propIds }) {
 }
 
 /* ---------------- ALERTS ---------------- */
+function buildAlerts(model, propIds) {
+  const out = [];
+  const list = propIds && propIds.length ? PROPERTIES.filter((p) => propIds.includes(p.id)) : PROPERTIES;
+  list.forEach((p) => {
+    const d = deriveProperty(p.id, model); if (!d || !d.latest) return;
+    const L = d.latest;
+    if (L.occ != null && L.occ < 0.45) out.push({ sev: L.occ < 0.25 ? "high" : "med", prop: p, kind: "Low occupancy", detail: `${fmtPct(L.occ)} in ${L.label} — below 45% target.` });
+    if (d.prev && L.occ != null && d.prev.occ != null) { const dd = delta(L.occ, d.prev.occ); if (dd != null && dd < -0.15) out.push({ sev: "med", prop: p, kind: "Occupancy dropping", detail: `down ${(dd * 100).toFixed(0)}% MoM.` }); }
+    if (d.prev && L.adr != null && d.prev.adr != null) { const dd = delta(L.adr, d.prev.adr); if (dd != null && dd < -0.12) out.push({ sev: "med", prop: p, kind: "Rate softening", detail: `ADR down ${(dd * 100).toFixed(0)}% MoM to ${fmtMoney(L.adr)}.` }); }
+    if (d.priorY != null) { const py = d.yoy.find((y) => y.month === L.monthName)?.[d.priorY]; const dd = delta(L.revenue, py); if (dd != null && dd < -0.2) out.push({ sev: "high", prop: p, kind: "Revenue below last year", detail: `${L.monthName} rev down ${(dd * 100).toFixed(0)}% YoY.` }); }
+  });
+  return out.sort((a, b) => (a.sev === "high" ? -1 : 1));
+}
 function Alerts({ model, propIds }) {
-  const alerts = useMemo(() => {
-    const out = [];
-    const list = propIds && propIds.length ? PROPERTIES.filter((p) => propIds.includes(p.id)) : PROPERTIES;
-    list.forEach((p) => {
-      const d = deriveProperty(p.id, model); if (!d || !d.latest) return;
-      const L = d.latest;
-      if (L.occ != null && L.occ < 0.45) out.push({ sev: L.occ < 0.25 ? "high" : "med", prop: p, kind: "Low occupancy", detail: `${fmtPct(L.occ)} in ${L.label} — below 45% target.` });
-      if (d.prev && L.occ != null && d.prev.occ != null) { const dd = delta(L.occ, d.prev.occ); if (dd != null && dd < -0.15) out.push({ sev: "med", prop: p, kind: "Occupancy dropping", detail: `down ${(dd * 100).toFixed(0)}% MoM.` }); }
-      if (d.prev && L.adr != null && d.prev.adr != null) { const dd = delta(L.adr, d.prev.adr); if (dd != null && dd < -0.12) out.push({ sev: "med", prop: p, kind: "Rate softening", detail: `ADR down ${(dd * 100).toFixed(0)}% MoM to ${fmtMoney(L.adr)}.` }); }
-      if (d.priorY != null) { const py = d.yoy.find((y) => y.month === L.monthName)?.[d.priorY]; const dd = delta(L.revenue, py); if (dd != null && dd < -0.2) out.push({ sev: "high", prop: p, kind: "Revenue below last year", detail: `${L.monthName} rev down ${(dd * 100).toFixed(0)}% YoY.` }); }
-    });
-    return out.sort((a, b) => (a.sev === "high" ? -1 : 1));
-  }, [model, (propIds || []).join()]);
+  const alerts = useMemo(() => buildAlerts(model, propIds), [model, (propIds || []).join()]);
   return (
     <Panel title="Alerts — low occupancy & rate watch">
       {!alerts.length ? <Empty text="No threshold breaches detected. Load more data to sharpen the watch." />
@@ -1881,6 +2125,15 @@ function Alerts({ model, propIds }) {
           ))}
         </div>}
     </Panel>
+  );
+}
+function AlertsPage({ model }) {
+  const propIds = PROPERTIES.map((p) => p.id);
+  return (
+    <div>
+      <SectionTitle sub="Threshold breaches across every property — occupancy, rate, and revenue watch">Alerts</SectionTitle>
+      <Alerts model={model} propIds={propIds} />
+    </div>
   );
 }
 
