@@ -1321,13 +1321,28 @@ const METRIC_DEFS = [
 // Linked squares + bar graph. Period control drives BOTH. Clicking a square selects the metric the
 // bar graph plots. Independent toggles: YoY/MoM comparison on the squares; prior-year and prior-month
 // paired bars on the graph.
-function MetricsBlock({ d, accent }) {
+// A property earns a YoY comparison only if it has a COMPLETE 12-month prior year.
+// Anything less (no 2025, or a partial stub like Woodbrook's Oct–Dec) shows MoM instead.
+function hasFullPriorYear(d, now = new Date()) {
+  const py = now.getFullYear() - 1;
+  const yr = d?.byYear?.[py];
+  if (!yr) return false;
+  let n = 0;
+  for (let i = 0; i < 12; i++) if (yr[i] && (yr[i].revenue != null)) n++;
+  return n >= 12;
+}
+// Shared control state for the squares + the linked chart.
+function useMetricsState(d, alwaysYoy) {
+  const full = alwaysYoy || hasFullPriorYear(d);
   const [period, setPeriod] = useState("mtd");
   const [metric, setMetric] = useState("revenue");
-  const noPrior = d.priorY == null;
-  const [cmp, setCmp] = useState((d.meta.compareMode === "yoy" && !noPrior) ? "yoy" : "mom");
-  const [showPY, setShowPY] = useState(false);
-  const [showPM, setShowPM] = useState(false);
+  const [cmp, setCmp] = useState(full ? "yoy" : "mom");
+  useEffect(() => { if (!full && cmp === "yoy") setCmp("mom"); }, [full]);
+  return { period, setPeriod, metric, setMetric, cmp, setCmp, canYoy: full };
+}
+
+function MetricsSquares({ d, accent, ctl }) {
+  const { period, setPeriod, metric, setMetric, cmp, setCmp, canYoy } = ctl;
   const now = new Date();
 
   const statsByMetric = {};
@@ -1349,24 +1364,18 @@ function MetricsBlock({ d, accent }) {
     return { dl, vsText, kind: useYoy ? "YoY" : "MoM" };
   };
 
-  // bar graph data
-  const barData = active.bars.map((b) => ({ month: b.label, cur: b.cur, prevYear: b.prevYear, prevMonth: b.prevMonth }));
-  const isPct = metric === "occ";
-  const axisFmt = isPct ? (v) => (v * 100).toFixed(0) + "%" : (v) => "$" + (v / 1000).toFixed(0) + "k";
-  const tipFmt = (v) => v == null ? "—" : (isPct ? fmtPct(v) : fmtMoney(v));
-
   const pill = (oncl, on, label, key) => (
     <button key={key} onClick={oncl} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${on ? accent : C.border}`, background: on ? accent : "#fff", color: on ? "#fff" : C.sub }}>{label}</button>
   );
 
   return (
     <div>
-      {/* period control (shared) */}
+      {/* period control — drives these squares AND the linked chart below */}
       <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
         {PERIOD_DEFS.map((p) => pill(() => setPeriod(p.id), period === p.id, p.label, p.id))}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           <span style={{ fontSize: 11.5, color: C.muted }}>Compare:</span>
-          {pill(() => setCmp("yoy"), cmp === "yoy", "YoY", "cyoy")}
+          {canYoy && pill(() => setCmp("yoy"), cmp === "yoy", "YoY", "cyoy")}
           {pill(() => setCmp("mom"), cmp === "mom", "MoM", "cmom")}
         </div>
       </div>
@@ -1391,28 +1400,49 @@ function MetricsBlock({ d, accent }) {
         })}
       </div>
 
-      {/* linked bar graph */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-        <div style={{ fontWeight: 700, color: C.ink, fontSize: 14 }}>{mDef.label} by month · {periodTag}</div>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          {pill(() => setShowPY((s) => !s), showPY, "Last year", "py")}
-          {pill(() => setShowPM((s) => !s), showPM, "Last month", "pm")}
-        </div>
-      </div>
-      <ResponsiveContainer width="100%" height={270}>
-        <ComposedChart data={barData} margin={{ top: 6, right: 8, left: -6, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-          <XAxis dataKey="month" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
-          <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={axisFmt} domain={isPct ? [0, 1] : undefined} />
-          <Tooltip formatter={(v) => tipFmt(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
-          <Legend wrapperStyle={{ fontSize: 12 }} />
-          {showPM && <Bar dataKey="prevMonth" fill="#b8c0cc" radius={[4, 4, 0, 0]} name="Prev month" />}
-          {showPY && <Bar dataKey="prevYear" fill="#c9d0da" radius={[4, 4, 0, 0]} name="Last year" />}
-          <Bar dataKey="cur" fill={accent} radius={[4, 4, 0, 0]} name={mDef.label} />
-          {isPct && <ReferenceLine y={0.7} stroke={C.bad} strokeDasharray="5 4" strokeWidth={1.5} label={{ value: "70% goal", position: "insideTopRight", fontSize: 10, fill: C.bad }} />}
-        </ComposedChart>
-      </ResponsiveContainer>
     </div>
+  );
+}
+
+// The ORIGINAL "Revenue by property" chart — one bar per property — now driven by the shared
+// period + metric control, with optional paired Last-year / Last-month bars.
+function PropertyBars({ derived, ctl, accent }) {
+  const { period, metric } = ctl;
+  const [showPY, setShowPY] = useState(false);
+  const [showPM, setShowPM] = useState(false);
+  const now = new Date();
+  const mDef = METRIC_DEFS.find((m) => m.id === metric);
+  const data = derived.map((d) => {
+    const s = periodStats(d, period, metric, now);
+    return { name: d.meta.short, color: d.meta.color, cur: s.value, prevYear: s.yoyValue, prevMonth: s.momValue };
+  });
+  const isPct = metric === "occ";
+  const axisFmt = isPct ? (v) => (v * 100).toFixed(0) + "%" : (v) => "$" + (v / 1000).toFixed(0) + "k";
+  const periodTag = PERIOD_DEFS.find((p) => p.id === period)?.label || "";
+  const pill = (oncl, on, label, key) => (
+    <button key={key} onClick={oncl} style={{ fontSize: 11.5, fontWeight: 600, padding: "4px 9px", borderRadius: 7, cursor: "pointer", border: `1px solid ${on ? accent : C.border}`, background: on ? accent : "#fff", color: on ? "#fff" : C.sub }}>{label}</button>
+  );
+  return (
+    <Panel title={`${mDef.label} by property — ${periodTag.toLowerCase()}`}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, justifyContent: "flex-end" }}>
+        {pill(() => setShowPY((s) => !s), showPY, "Last year", "py")}
+        {pill(() => setShowPM((s) => !s), showPM, "Last month", "pm")}
+      </div>
+      {data.some((c) => c.cur) ? (
+        <ResponsiveContainer width="100%" height={260}>
+          <BarChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+            <XAxis dataKey="name" tick={{ fontSize: 12, fill: C.muted }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={axisFmt} domain={isPct ? [0, 1] : undefined} />
+            <Tooltip formatter={(v) => v == null ? "—" : (isPct ? fmtPct(v) : fmtMoney(v))} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+            {(showPY || showPM) && <Legend wrapperStyle={{ fontSize: 12 }} />}
+            <Bar dataKey="cur" radius={[6, 6, 0, 0]} name={mDef.label}>{data.map((c) => <Cell key={c.name} fill={c.color} />)}</Bar>
+            {showPY && <Bar dataKey="prevYear" fill="#c9d0da" radius={[6, 6, 0, 0]} name="Last year" />}
+            {showPM && <Bar dataKey="prevMonth" fill="#b8c0cc" radius={[6, 6, 0, 0]} name="Last month" />}
+          </BarChart>
+        </ResponsiveContainer>
+      ) : <Empty text="Load data to compare properties." />}
+    </Panel>
   );
 }
 
@@ -1458,6 +1488,7 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
   }, [derived]);
 
   const portfolioDerived = useMemo(() => deriveCombined(propIds, model, { units: props.reduce((a, p) => a + (p.units || 0), 0), color: accent, compareMode: "yoy", name: title }), [model, propIds.join(), accent]);
+  const ctl = useMetricsState(portfolioDerived, true); // portfolio: straight YoY always available
 
   return (
     <div>
@@ -1470,22 +1501,10 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
         </div>
       )}
 
-      <MetricsBlock d={portfolioDerived} accent={accent} />
+      <MetricsSquares d={portfolioDerived} accent={accent} ctl={ctl} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
-        <Panel title="Revenue by property — current month">
-          {compare.some((c) => c.revenue) ? (
-            <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={compare} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-                <XAxis dataKey="name" tick={{ fontSize: 12, fill: C.muted }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
-                <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
-                <Bar dataKey="revenue" radius={[6, 6, 0, 0]}>{compare.map((c) => <Cell key={c.name} fill={c.color} />)}</Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          ) : <Empty text="Load data to compare properties." />}
-        </Panel>
+        <PropertyBars derived={derived} ctl={ctl} accent={accent} />
         <Panel title={channelTitle}><OtaChart d={{ ota: portfolioOta, otaByMonth: portfolioOtaByMonth, meta: { color: accent } }} /></Panel>
       </div>
 
@@ -1863,6 +1882,7 @@ function AnnualBoard({ derived, goto }) {
 
 function PropertyPage({ pid, model, setModel }) {
   const d = useMemo(() => deriveProperty(pid, model), [pid, model]);
+  const ctl = useMetricsState(d, false); // YoY only if this property has a full prior year
   const meta = PROP_BY_ID[pid];
   if (!d) return (<><SectionTitle sub={`${meta.location} · ${meta.units} units`}>{meta.name}</SectionTitle><Panel title="No data"><Empty text={`Upload a file for ${meta.name} (or any combined export) to populate this page.`} /></Panel></>);
   return (
@@ -1872,7 +1892,10 @@ function PropertyPage({ pid, model, setModel }) {
         <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>{meta.name}</h1>
           <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{meta.location} · {meta.units} units · latest {d.latest?.label || "—"}</div></div>
       </div>
-      <MetricsBlock d={d} accent={meta.color} />
+      <MetricsSquares d={d} accent={meta.color} ctl={ctl} />
+      <div style={{ marginTop: 16 }}>
+        <Panel title={ctl.canYoy ? "Revenue — year over year by month" : "Revenue by month"}><RevenueChart d={d} /></Panel>
+      </div>
       {d.snap && <div style={{ marginTop: 16 }}><AnnualSummary d={d} /></div>}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
         <GoalTracker d={d} model={model} setModel={setModel} />
@@ -1904,6 +1927,7 @@ function KhorramiPage({ model, setModel }) {
     if (scope === "all") return deriveCombined(members, model, { ...KHORRAMI });
     return deriveProperty(scope, model);
   }, [scope, model]);
+  const ctl = useMetricsState(d, false);
   const meta = scope === "all" ? KHORRAMI : PROP_BY_ID[scope];
   const scopes = [{ id: "all", name: "All (combined)" }, { id: "woodbrook", name: "Woodbrook" }, { id: "rogers", name: "Rogers" }];
   return (
@@ -1920,7 +1944,7 @@ function KhorramiPage({ model, setModel }) {
       </div>
       {!d ? <Panel title="No data"><Empty text="Upload Woodbrook or Rogers data to populate this page." /></Panel> : (
         <>
-          <MetricsBlock d={d} accent={meta.color} />
+          <MetricsSquares d={d} accent={meta.color} ctl={ctl} />
           <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
             <Panel title="Revenue trend"><TrendChart series={d.series} dataKey="revenue" color={meta.color} fmt={(v) => "$" + (v / 1000).toFixed(0) + "k"} /></Panel>
             <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
