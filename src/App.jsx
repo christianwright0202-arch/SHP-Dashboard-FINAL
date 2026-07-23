@@ -56,7 +56,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 const MONTH_IDX = Object.fromEntries(MONTHS.map((m, i) => [m.toLowerCase(), i]));
 const OTA_COLORS = { Airbnb: "#e23b3b", Vrbo: "#1668e3", Expedia: "#f5c518", "Booking.com": "#f08a24", Direct: "#1f7a4d", Other: "#94a3b8" };
 
-const MODEL = { properties: {}, ads: {}, events: [], eventsSource: "none", lastUpdated: null, goals: {}, activity: [], deals: [] };
+const MODEL = { properties: {}, ads: {}, events: [], eventsSource: "none", lastUpdated: null, goals: {}, activity: [], deals: [], roster: null };
 
 // World Cup window + AT&T Stadium (Dallas Stadium), Arlington fixtures
 const WC_START = "2026-06-12", WC_END = "2026-07-15";
@@ -92,6 +92,85 @@ const pct = (v) => {
   return n;
 };
 const daysInMonth = (year, mIdx) => new Date(year, mIdx + 1, 0).getDate();
+
+/* ---------------- UNIT ROSTER ----------------
+   Occupancy = occupied unit-nights / AVAILABLE unit-nights. Availability is computed day-by-day
+   from this roster, so units that come online or get offboarded mid-month are counted for exactly
+   the days they were live. Dates are inclusive; null start = "always was", null end = "still live".
+   Onboarding dates below were derived from first-booking dates in the real reports and verified;
+   offboarding dates were confirmed by Christian. This roster is editable in the app (Units page).
+------------------------------------------------ */
+const DEFAULT_ROSTER = {
+  // Hotels / RevPAR-sourced properties: flat count, no per-unit dates needed
+  soma: { mode: "flat", flat: 35 },
+  rambler: { mode: "flat", flat: 22 },
+  harley: { mode: "flat", flat: 3 },
+  woodbrook: { mode: "flat", flat: 1 },
+  rogers: { mode: "flat", flat: 2 },
+  // Kress: 7 units → 402 online May 2025 → 8; 201 online Feb 2026 → 9
+  kress: { mode: "list", units: [
+    { name: "Kress - 306", start: null, end: null },
+    { name: "Kress - 307", start: null, end: null },
+    { name: "Kress - 308", start: null, end: null },
+    { name: "Kress - 404", start: null, end: null },
+    { name: "Kress - 406", start: null, end: null },
+    { name: "Kress - 407", start: null, end: null },
+    { name: "Kress - 408", start: null, end: null },
+    { name: "Kress - 402", start: "2025-05-01", end: null },
+    { name: "Kress - 201", start: "2026-02-01", end: null },
+  ] },
+  // The Ryan: 18 units; 3 offboarded 6/30/26, 808 on 7/11/26, 905 on 7/31/26 → 18→15→14→13
+  ryan: { mode: "list", units: [
+    { name: "Ballpark 701", start: null, end: null },
+    { name: "Ballpark 705", start: null, end: null },
+    { name: "Ballpark 706", start: null, end: null },
+    { name: "Ballpark 707", start: null, end: null },
+    { name: "Ballpark 708", start: null, end: null },
+    { name: "Ballpark 709", start: null, end: null },
+    { name: "Ballpark 803", start: null, end: null },
+    { name: "Ballpark 805", start: null, end: null },
+    { name: "Ballpark 902", start: null, end: null },
+    { name: "Ballpark 903", start: null, end: null },
+    { name: "Ballpark 904", start: null, end: null },
+    { name: "Ballpark 906", start: null, end: null },
+    { name: "Ballpark 908", start: null, end: null },
+    { name: "Ballpark 809", start: null, end: "2026-06-30" },
+    { name: "Ballpark 807", start: null, end: "2026-06-30" },
+    { name: "Ballpark 804", start: null, end: "2026-06-30" },
+    { name: "Ballpark 808", start: null, end: "2026-07-11" },
+    { name: "Ballpark 905", start: null, end: "2026-07-31" },
+  ] },
+};
+const parseISO = (s) => { if (!s) return null; const [y, m, d] = String(s).split("-").map(Number); return new Date(y, (m || 1) - 1, d || 1); };
+// Available unit-NIGHTS for one property in one month, counted day by day.
+function availUnitNights(pid, year, mIdx, model) {
+  const r = (model && model.roster && model.roster[pid]) || DEFAULT_ROSTER[pid];
+  const days = daysInMonth(year, mIdx);
+  if (!r) { const u = PROP_BY_ID[pid]?.units || 0; return u * days; }
+  if (r.mode === "flat") return (r.flat || 0) * days;
+  let total = 0;
+  const mStart = new Date(year, mIdx, 1), mEnd = new Date(year, mIdx, days);
+  (r.units || []).forEach((u) => {
+    const s = parseISO(u.start) || new Date(1900, 0, 1);
+    const e = parseISO(u.end) || new Date(2999, 11, 31);
+    const from = s > mStart ? s : mStart, to = e < mEnd ? e : mEnd;
+    if (to >= from) total += Math.round((to - from) / 86400000) + 1;
+  });
+  return total;
+}
+// How many distinct units were live at any point in this month (for display/audit)
+function unitsActive(pid, year, mIdx, model) {
+  const r = (model && model.roster && model.roster[pid]) || DEFAULT_ROSTER[pid];
+  if (!r) return PROP_BY_ID[pid]?.units || 0;
+  if (r.mode === "flat") return r.flat || 0;
+  const days = daysInMonth(year, mIdx);
+  const mStart = new Date(year, mIdx, 1), mEnd = new Date(year, mIdx, days);
+  return (r.units || []).filter((u) => {
+    const s = parseISO(u.start) || new Date(1900, 0, 1);
+    const e = parseISO(u.end) || new Date(2999, 11, 31);
+    return e >= mStart && s <= mEnd;
+  }).length;
+}
 const norm = (s) => String(s ?? "").toLowerCase().trim();
 
 function classifyListing(name) {
@@ -309,7 +388,28 @@ function ingestSheet(rows, ctx) {
       let rev = num(r[cAF]); const nights = num(r[cNights]) || 0;
       if (rev == null && cADR >= 0) rev = (num(r[cADR]) || 0) * nights;
       if (rev == null) continue;
-      out.push({ kind: "res", prop, month: mkey(d.getFullYear(), d.getMonth()), year: d.getFullYear(), mIdx: d.getMonth(), revenue: rev, nights, source: sourceLabel(r[cSrc]) });
+      // Split the stay across the months its nights actually fall in, so a stay starting Jun 28
+      // puts 3 nights in June and 4 in July instead of all 7 in June. Revenue follows the nights.
+      const spans = [];
+      if (nights > 1) {
+        const counts = {};
+        for (let i = 0; i < nights; i++) {
+          const nd = new Date(d.getFullYear(), d.getMonth(), d.getDate() + i);
+          const k = `${nd.getFullYear()}-${nd.getMonth()}`;
+          counts[k] = (counts[k] || 0) + 1;
+        }
+        for (const [k, n] of Object.entries(counts)) {
+          const [yy, mm] = k.split("-").map(Number);
+          spans.push({ yy, mm, n });
+        }
+      } else {
+        spans.push({ yy: d.getFullYear(), mm: d.getMonth(), n: nights || 0 });
+      }
+      const src = sourceLabel(r[cSrc]);
+      spans.forEach(({ yy, mm, n }) => {
+        const share = nights > 0 ? n / nights : 1;
+        out.push({ kind: "res", prop, month: mkey(yy, mm), year: yy, mIdx: mm, revenue: rev * share, nights: n, source: src });
+      });
     }
     return out;
   }
@@ -566,11 +666,13 @@ function deriveProperty(pid, model, metaOverride) {
     const [y, m] = k.split("-").map(Number);
     const d = monthly[k];
     const days = daysInMonth(y, m - 1);
-    const avail = meta.units * days;
-    const occ = d.occ != null ? d.occ : d.nights ? Math.min(1, d.nights / avail) : null;
+    const avail = (p.availByMonth && p.availByMonth[k] != null) ? p.availByMonth[k] : availUnitNights(pid, y, m - 1, model);
+    const rawOcc = d.occ != null ? d.occ : d.nights && avail ? d.nights / avail : null;
+    const occ = rawOcc; // NOT clamped — an impossible value must be visible, not hidden
+    const overbooked = rawOcc != null && rawOcc > 1.0001;
     const adr = d.adr != null ? d.adr : d.nights ? d.revenue / d.nights : null;
     const revpar = d.revpar != null ? d.revpar : avail ? d.revenue / avail : null;
-    return { key: k, year: y, mIdx: m - 1, label: `${MONTHS[m - 1]} '${String(y).slice(2)}`, monthName: MONTHS[m - 1], revenue: d.revenue, occ, adr, revpar, nights: d.nights };
+    return { key: k, year: y, mIdx: m - 1, label: `${MONTHS[m - 1]} '${String(y).slice(2)}`, monthName: MONTHS[m - 1], revenue: d.revenue, occ, adr, revpar, nights: d.nights, avail, unitsActive: unitsActive(pid, y, m - 1, model), overbooked };
   });
   const snap = p.snapshot && p.snapshot.revenue ? p.snapshot : null;
   // Use the most recent month that actually has revenue (skip empty future months like unbooked Oct/Nov/Dec)
@@ -642,7 +744,7 @@ function deriveProperty(pid, model, metaOverride) {
   const otaByMonth = p.otaByMonth || {};
   const goal = (model.goals && model.goals[pid] != null) ? model.goals[pid] : (meta.goal || null);
 
-  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
 }
 // Combine several properties into one derived object (Khorrami "All", or the whole portfolio).
 // Pools correctly: sums revenue + nights per month, then recomputes occ/ADR/RevPAR against the
@@ -650,14 +752,18 @@ function deriveProperty(pid, model, metaOverride) {
 function deriveCombined(memberIds, model, meta) {
   // Resolve each member with its OWN best source first (RevPAR or channel fallback), THEN pool.
   // (Merging raw buckets would let a RevPAR member's month keys hide a channel-only member.)
-  const monthly = {}, otaByMonth = {}, ota = {};
+  const monthly = {}, otaByMonth = {}, ota = {}, availByMonth = {};
   memberIds.forEach((mid) => {
     const dm = deriveProperty(mid, model); if (!dm) return;
-    dm.series.forEach((s) => { const cur = (monthly[s.key] = monthly[s.key] || { revenue: 0, nights: 0 }); cur.revenue += s.revenue || 0; cur.nights += s.nights || 0; });
+    dm.series.forEach((s) => {
+      const cur = (monthly[s.key] = monthly[s.key] || { revenue: 0, nights: 0 });
+      cur.revenue += s.revenue || 0; cur.nights += s.nights || 0;
+      availByMonth[s.key] = (availByMonth[s.key] || 0) + (s.avail || 0);
+    });
     for (const [mk, srcs] of Object.entries(dm.otaByMonth || {})) { const dst = (otaByMonth[mk] = otaByMonth[mk] || {}); for (const [s, v] of Object.entries(srcs)) dst[s] = (dst[s] || 0) + v; }
     (dm.ota || []).forEach((o) => { ota[o.name] = (ota[o.name] || 0) + o.value; });
   });
-  const merged = { monthly, channelMonthly: {}, ota, otaByMonth, snapshot: null };
+  const merged = { monthly, channelMonthly: {}, ota, otaByMonth, snapshot: null, availByMonth };
   const tempModel = { ...model, properties: { ...model.properties, __combined: merged } };
   return deriveProperty("__combined", tempModel, meta);
 }
@@ -687,13 +793,14 @@ function poolMonths(d, monthList, metric) {
   let rev = 0, nights = 0, avail = 0, hasAny = false;
   monthList.forEach(({ year, mIdx }) => {
     const s = d.byYear?.[year]?.[mIdx];
-    const days = daysInMonth(year, mIdx);
-    avail += (d.meta.units || 0) * days;
+    // Prefer the availability already resolved on the series row (roster-aware, and for combined
+    // views it is the summed availability of the members). Fall back to the roster directly.
+    avail += (s && s.avail != null) ? s.avail : availUnitNights(d.pid, year, mIdx, d.__model);
     if (s) { hasAny = true; rev += s.revenue || 0; nights += s.nights || 0; }
   });
   if (!hasAny) return null;
   if (metric === "revenue") return rev;
-  if (metric === "occ") return avail ? Math.min(1, nights / avail) : null;
+  if (metric === "occ") return avail ? nights / avail : null; // NOT clamped
   if (metric === "adr") return nights ? rev / nights : null;
   if (metric === "revpar") return avail ? rev / avail : null;
   return null;
@@ -1020,6 +1127,7 @@ function Dashboard() {
           ))}
           <div style={{ fontSize: 10, letterSpacing: 2, color: "#6c7d96", margin: "16px 8px 6px", fontWeight: 700 }}>INTELLIGENCE</div>
           <NavItem icon={<AlertTriangle size={17} />} label="Alerts" active={page === "alerts"} onClick={() => setPage("alerts")} color="#8ea0b8" notify={alertCount} />
+          <NavItem icon={<Building2 size={17} />} label="Units" active={page === "units"} onClick={() => setPage("units")} color="#8ea0b8" />
           <NavItem icon={<Calendar size={17} />} label="Events" active={page === "events"} onClick={() => setPage("events")} color="#8ea0b8" />
           <NavItem icon={<TrendingUp size={17} />} label="Ad Performance" active={page === "ads"} onClick={() => setPage("ads")} color="#8ea0b8" />
           <NavItem icon={<MessageSquare size={17} />} label="Ask the Board" active={page === "ask"} onClick={() => setPage("ask")} color="#8ea0b8" />
@@ -1084,6 +1192,7 @@ function Dashboard() {
               : page === "overview" ? <Overview model={model} hasData={hasData} onUpload={() => fileRef.current?.click()} goto={setPage} />
                 : page === "khorrami" ? <KhorramiPage model={model} setModel={setModel} />
                 : page === "alerts" ? <AlertsPage model={model} />
+                : page === "units" ? <UnitsPage model={model} setModel={setModel} canEdit={canEdit} />
                 : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={model} goto={setPage} />
                 : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
                   : page === "ask" ? <AskPage model={model} />
@@ -1389,7 +1498,8 @@ function MetricsSquares({ d, accent, ctl }) {
           return (
             <button key={m.id} onClick={() => setMetric(m.id)} style={{ textAlign: "left", cursor: "pointer", background: C.panel, border: `1px solid ${selected ? accent : C.border}`, borderRadius: 14, padding: "16px 16px 14px", boxShadow: selected ? `0 0 0 1px ${accent}` : "none" }}>
               <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .5 }}>{m.icon}{m.label}</div>
-              <div style={{ fontFamily: "Georgia,serif", fontSize: 26, fontWeight: 700, marginTop: 6 }}>{m.fmt(st.value)}</div>
+              <div style={{ fontFamily: "Georgia,serif", fontSize: 26, fontWeight: 700, marginTop: 6, color: (m.id === "occ" && st.value > 1.0001) ? C.bad : undefined }}>{m.fmt(st.value)}</div>
+              {m.id === "occ" && st.value > 1.0001 && <div className="ui" style={{ fontSize: 10.5, color: C.bad, fontWeight: 700, marginTop: 2 }}>⚠ over 100% — check unit count on the Units page</div>}
               <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 3 }}>{periodTag}</div>
               <div className="ui" style={{ fontSize: 12, marginTop: 4 }}>
                 {c.dl != null ? <span style={{ color: c.dl >= 0 ? C.good : C.bad, fontWeight: 700 }}>{c.dl >= 0 ? "▲" : "▼"} {Math.abs(c.dl * 100).toFixed(1)}% {c.kind}</span> : <span style={{ color: C.faint }}>— {c.kind}</span>}
@@ -2151,6 +2261,66 @@ function Alerts({ model, propIds }) {
     </Panel>
   );
 }
+function UnitsPage({ model, setModel, canEdit }) {
+  const roster = model.roster || DEFAULT_ROSTER;
+  const now = new Date();
+  const setRoster = (pid, next) => setModel((m) => ({ ...m, roster: { ...(m.roster || DEFAULT_ROSTER), [pid]: next } }));
+  const inp = { fontSize: 12, padding: "4px 7px", borderRadius: 6, border: `1px solid ${C.border}`, background: "#fff", color: C.ink };
+  return (
+    <div>
+      <SectionTitle sub="Occupancy = booked nights ÷ available unit-nights. This roster sets the denominator, counted day by day — so a unit that leaves mid-month counts only for the days it was live.">Units</SectionTitle>
+      {!canEdit && <div className="ui" style={{ marginBottom: 14, padding: "9px 12px", borderRadius: 9, background: "#f4f6f8", border: `1px solid ${C.border}`, fontSize: 12.5, color: C.sub }}>View-only — unlock editing to change the roster.</div>}
+      <div style={{ display: "grid", gap: 14 }}>
+        {PROPERTIES.map((p) => {
+          const r = roster[p.id] || DEFAULT_ROSTER[p.id] || { mode: "flat", flat: p.units };
+          const liveNow = unitsActive(p.id, now.getFullYear(), now.getMonth(), model);
+          return (
+            <Panel key={p.id} title={`${p.name} — ${liveNow} unit${liveNow === 1 ? "" : "s"} live now`}>
+              {r.mode === "flat" ? (
+                <div className="ui" style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13 }}>
+                  <span style={{ color: C.muted }}>Fixed unit count:</span>
+                  <input type="number" min="0" value={r.flat} disabled={!canEdit} style={{ ...inp, width: 80 }}
+                    onChange={(e) => setRoster(p.id, { ...r, flat: Number(e.target.value) || 0 })} />
+                  {canEdit && <button onClick={() => setRoster(p.id, { mode: "list", units: Array.from({ length: r.flat }, (_, i) => ({ name: `${p.short} unit ${i + 1}`, start: null, end: null })) })}
+                    style={{ ...inp, cursor: "pointer", color: C.sub }}>Switch to per-unit dates</button>}
+                </div>
+              ) : (
+                <div>
+                  <div className="ui" style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 40px", gap: 8, fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5, marginBottom: 6 }}>
+                    <span>Unit</span><span>Online from</span><span>Offline after</span><span />
+                  </div>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {(r.units || []).map((u, i) => {
+                      const upd = (patch) => { const units = [...r.units]; units[i] = { ...u, ...patch }; setRoster(p.id, { ...r, units }); };
+                      return (
+                        <div key={i} style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 40px", gap: 8, alignItems: "center" }}>
+                          <input value={u.name} disabled={!canEdit} style={inp} onChange={(e) => upd({ name: e.target.value })} />
+                          <input type="date" value={u.start || ""} disabled={!canEdit} style={inp} onChange={(e) => upd({ start: e.target.value || null })} />
+                          <input type="date" value={u.end || ""} disabled={!canEdit} style={inp} onChange={(e) => upd({ end: e.target.value || null })} />
+                          {canEdit && <button onClick={() => setRoster(p.id, { ...r, units: r.units.filter((_, j) => j !== i) })}
+                            style={{ ...inp, cursor: "pointer", color: C.bad, borderColor: "#f0d0d0" }}>×</button>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {canEdit && <button onClick={() => setRoster(p.id, { ...r, units: [...(r.units || []), { name: "New unit", start: null, end: null }] })}
+                    style={{ ...inp, cursor: "pointer", marginTop: 9, color: C.sub, display: "flex", alignItems: "center", gap: 6 }}><Plus size={12} /> Add unit</button>}
+                </div>
+              )}
+              <div className="ui" style={{ marginTop: 10, fontSize: 11.5, color: C.muted, borderTop: `1px solid ${C.border}`, paddingTop: 8 }}>
+                Available unit-nights: {[0, 1, 2].map((back) => {
+                  const dt = new Date(now.getFullYear(), now.getMonth() - back, 1);
+                  return `${MONTHS[dt.getMonth()]} ${dt.getFullYear()} = ${availUnitNights(p.id, dt.getFullYear(), dt.getMonth(), model)}`;
+                }).join("  ·  ")}
+              </div>
+            </Panel>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function AlertsPage({ model }) {
   const propIds = PROPERTIES.map((p) => p.id);
   return (
