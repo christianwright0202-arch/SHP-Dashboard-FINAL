@@ -1268,8 +1268,18 @@ function SectionTitle({ children, sub }) {
 }
 
 /* ---------------- charts ---------------- */
-function RevenueChart({ d }) {
+const METRIC_DEFS = [
+  { id: "revenue", label: "Revenue", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <DollarSign size={15} /> },
+  { id: "occ", label: "Occupancy", fmt: (v) => v == null ? "—" : fmtPct(v), icon: <Percent size={15} /> },
+  { id: "adr", label: "ADR", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <BedDouble size={15} /> },
+  { id: "revpar", label: "RevPAR", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <Gauge size={15} /> },
+];
+
+function RevenueChart({ d, metric = "revenue" }) {
   const [showOcc, setShowOcc] = useState(false);
+  const mDef = METRIC_DEFS.find((x) => x.id === metric) || METRIC_DEFS[0];
+  const isPct = metric === "occ";
+  const fmtV = (v) => v == null ? "—" : (isPct ? fmtPct(v) : fmtMoney(v));
   const mode = d.meta.compareMode || (d.priorY != null ? "yoy" : "mom");
   const now = new Date();
   const cur = d.curY;
@@ -1284,15 +1294,15 @@ function RevenueChart({ d }) {
 
   const data = idxs.map((i) => ({
     month: MONTHS[i],
-    cur: curMonths[i]?.revenue ?? null,
-    prior: priorMonths[i]?.revenue ?? null,
+    cur: curMonths[i]?.[metric] ?? null,
+    prior: priorMonths[i]?.[metric] ?? null,
     occ: curMonths[i]?.occ ?? null,
   }));
   // headline comparison for the focused month
-  const fCur = curMonths[focus]?.revenue ?? null;
+  const fCur = curMonths[focus]?.[metric] ?? null;
   let cmpVal, cmpLabel;
-  if (mode === "yoy") { cmpVal = priorMonths[focus]?.revenue ?? null; cmpLabel = `${MONTHS[focus]} ${d.priorY}`; }
-  else { const p = curMonths[focus - 1]?.revenue ?? null; cmpVal = p; cmpLabel = focus > 0 ? `${MONTHS[focus - 1]} ${cur}` : "prev mo"; }
+  if (mode === "yoy") { cmpVal = priorMonths[focus]?.[metric] ?? null; cmpLabel = `${MONTHS[focus]} ${d.priorY}`; }
+  else { const p = curMonths[focus - 1]?.[metric] ?? null; cmpVal = p; cmpLabel = focus > 0 ? `${MONTHS[focus - 1]} ${cur}` : "prev mo"; }
   const dl = (cmpVal != null && cmpVal > 0 && fCur != null) ? (fCur - cmpVal) / cmpVal : null;
   const accent = d.meta.color;
 
@@ -1303,21 +1313,21 @@ function RevenueChart({ d }) {
           {idxs.slice().reverse().map((i) => <option key={i} value={i}>{MONTHS[i]} {cur}{i === now.getMonth() ? " (current)" : ""}</option>)}
         </select>
         <span style={{ fontSize: 13 }}>
-          <b>{fCur != null ? fmtMoney(fCur) : "—"}</b>
-          <span style={{ color: C.muted }}> vs {cmpLabel} {cmpVal != null ? fmtMoney(cmpVal) : "—"}</span>
+          <b>{fmtV(fCur)}</b>
+          <span style={{ color: C.muted }}> vs {cmpLabel} {fmtV(cmpVal)}</span>
           {dl != null && <b style={{ marginLeft: 6, color: dl >= 0 ? C.good : C.bad }}>{dl >= 0 ? "+" : ""}{(dl * 100).toFixed(0)}% {mode === "yoy" ? "YoY" : "MoM"}</b>}
         </span>
-        <button onClick={() => setShowOcc((s) => !s)} style={{ marginLeft: "auto", fontSize: 12, fontWeight: 600, padding: "5px 11px", borderRadius: 7, cursor: "pointer", border: `1px solid ${showOcc ? accent : C.border}`, background: showOcc ? accent : "#fff", color: showOcc ? "#fff" : C.sub }}>
+        {!isPct && <button onClick={() => setShowOcc((s) => !s)} style={{ marginLeft: "auto", fontSize: 12, fontWeight: 600, padding: "5px 11px", borderRadius: 7, cursor: "pointer", border: `1px solid ${showOcc ? accent : C.border}`, background: showOcc ? accent : "#fff", color: showOcc ? "#fff" : C.sub }}>
           {showOcc ? "Hide occupancy" : "Show occupancy"}
-        </button>
+        </button>}
       </div>
       <ResponsiveContainer width="100%" height={260}>
         <ComposedChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
           <XAxis dataKey="month" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
-          <YAxis yAxisId="rev" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
+          <YAxis yAxisId="rev" domain={isPct ? [0, 1] : undefined} tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => isPct ? (v * 100).toFixed(0) + "%" : (metric === "revenue" ? "$" + (v / 1000).toFixed(0) + "k" : "$" + Math.round(v))} />
           {showOcc && <YAxis yAxisId="occ" orientation="right" domain={[0, 1]} tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => (v * 100).toFixed(0) + "%"} />}
-          <Tooltip formatter={(v, name) => name === "Occupancy" ? fmtPct(v) : fmtMoney(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
+          <Tooltip formatter={(v, name) => name === "Occupancy" ? fmtPct(v) : fmtV(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
           {mode === "yoy" && <Bar yAxisId="rev" dataKey="prior" fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${d.priorY}`} />}
           <Bar yAxisId="rev" dataKey="cur" fill={accent} radius={[4, 4, 0, 0]} name={`${cur}`} />
@@ -1421,12 +1431,6 @@ function RegionPage({ region, model, goto }) {
   return <PortfolioView model={model} props={props} title={rg ? rg.name : "Region"} sub={`${props.length} properties in ${rg ? rg.name : region}`} accent={C.slate} goto={goto} hasData channelTitle={`Channel mix — ${rg ? rg.name : region}`} regionMode />;
 }
 
-const METRIC_DEFS = [
-  { id: "revenue", label: "Revenue", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <DollarSign size={15} /> },
-  { id: "occ", label: "Occupancy", fmt: (v) => v == null ? "—" : fmtPct(v), icon: <Percent size={15} /> },
-  { id: "adr", label: "ADR", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <BedDouble size={15} /> },
-  { id: "revpar", label: "RevPAR", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <Gauge size={15} /> },
-];
 // Linked squares + bar graph. Period control drives BOTH. Clicking a square selects the metric the
 // bar graph plots. Independent toggles: YoY/MoM comparison on the squares; prior-year and prior-month
 // paired bars on the graph.
@@ -2004,7 +2008,7 @@ function PropertyPage({ pid, model, setModel }) {
       </div>
       <MetricsSquares d={d} accent={meta.color} ctl={ctl} />
       <div style={{ marginTop: 16 }}>
-        <Panel title={ctl.canYoy ? "Revenue — year over year by month" : "Revenue by month"}><RevenueChart d={d} /></Panel>
+        <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} — ${ctl.canYoy ? "year over year by month" : "by month"}`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
       </div>
       {d.snap && <div style={{ marginTop: 16 }}><AnnualSummary d={d} /></div>}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
@@ -2056,7 +2060,7 @@ function KhorramiPage({ model, setModel }) {
         <>
           <MetricsSquares d={d} accent={meta.color} ctl={ctl} />
           <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
-            <Panel title="Revenue trend"><TrendChart series={d.series} dataKey="revenue" color={meta.color} fmt={(v) => "$" + (v / 1000).toFixed(0) + "k"} /></Panel>
+            <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} by month`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
             <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
           </div>
           <div style={{ marginTop: 16 }}><HealthBoard derived={[d]} goto={() => {}} title="Property health" /></div>
