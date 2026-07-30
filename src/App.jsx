@@ -2484,7 +2484,7 @@ function AuditPage({ model, setModel }) {
     if (!window.confirm(`Delete ALL stored data for ${PROP_BY_ID[pid]?.name}? The months stay listed so you can re-upload files or type correct numbers in.`)) return;
     setModel((m) => {
       const next = JSON.parse(JSON.stringify(m));
-      next.properties[pid] = { monthly: {}, ota: {}, otaByMonth: {}, snapshot: null, pace: null, wc: {} };
+      next.properties[pid] = { monthly: {}, channelMonthly: {}, availByMonth: {}, ota: {}, otaByMonth: {}, snapshot: null, pace: null, wc: {} };
       next.lastUpdated = new Date().toISOString();
       return next;
     });
@@ -2550,18 +2550,20 @@ function AuditPage({ model, setModel }) {
                     <tbody>
                       {monthKeys.map((key) => {
                         const [y, mo] = key.split("-").map(Number);
-                        const days = daysInMonth(y, mo - 1); const avail = d.meta.units * days;
-                        const dd = d.raw.monthly[key] || {};
-                        const rev = dd.revenue || 0;
-                        const occ = dd.occ != null ? dd.occ : (dd.nights ? Math.min(1, dd.nights / avail) : null);
-                        const nights = dd.nights != null ? dd.nights : (occ != null ? Math.round(occ * avail) : null);
-                        const adr = dd.adr != null ? dd.adr : (nights ? rev / nights : null);
-                        const revpar = dd.revpar != null ? dd.revpar : (avail ? rev / avail : null);
+                        // Read the SAME merged, roster-aware figures the rest of the dashboard uses,
+                        // so STR (channel) and RevPAR (headline) properties both display correctly.
+                        const srow = d.byYear?.[y]?.[mo - 1] || null;
+                        const rev = srow?.revenue || 0;
+                        const occ = srow?.occ ?? null;
+                        const nights = srow?.nights != null ? Math.round(srow.nights) : null;
+                        const adr = srow?.adr ?? null;
+                        const revpar = srow?.revpar ?? null;
+                        const over = srow?.overbooked;
                         return (
                           <tr key={key} style={{ borderBottom: `1px solid ${C.track}` }}>
                             <td style={{ padding: "6px 10px", fontWeight: 600, whiteSpace: "nowrap" }}>{MONTHS[mo - 1]} {y}</td>
                             <td style={{ padding: "6px 10px" }}><EditNum value={rev || ""} prefix="$" onCommit={(v) => setCell(d.pid, key, "revenue", v)} /></td>
-                            <td style={{ padding: "6px 10px" }}><EditNum value={occ != null ? (occ * 100).toFixed(1) : ""} suffix="%" width={70} onCommit={(v) => setCell(d.pid, key, "occ", v)} /></td>
+                            <td style={{ padding: "6px 10px", color: over ? C.bad : undefined, fontWeight: over ? 700 : undefined }}>{occ != null ? (occ * 100).toFixed(1) + "%" : "—"}{over ? " ⚠" : ""}</td>
                             <td style={{ padding: "6px 10px", color: C.muted }}>{nights != null ? nights : "—"}</td>
                             <td style={{ padding: "6px 10px" }}>{fmtMoney(adr)}</td>
                             <td style={{ padding: "6px 10px" }}>{fmtMoney(revpar)}</td>
