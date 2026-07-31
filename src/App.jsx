@@ -191,8 +191,12 @@ function sourceLabel(raw) {
   if (n.includes("airbnb")) return "Airbnb";
   if (n.includes("vrbo") || n.includes("homeaway")) return "Vrbo";
   if (n.includes("expedia")) return "Expedia";
-  if (n.includes("website") || n.includes("engine") || n.includes("walk") || n.includes("direct") || n.includes("hostfully") || n.includes("cloudbeds") || n.includes("manual")) return "Direct";
-  if (n.includes("booking")) return "Booking.com";
+  if (n.includes("website") || n.includes("engine")) return "Website/Booking Engine"; // before booking.com — this name contains "booking"
+  if (n.includes("booking.com") || n === "booking" || n.includes("booking com")) return "Booking.com";
+  if (n.includes("walk")) return "Walk-In";
+  if (n.includes("phone")) return "Phone";
+  if (n.includes("direct") || n.includes("hostfully") || n.includes("cloudbeds") || n.includes("manual")) return "Direct";
+  if (n.includes("booking")) return "Booking.com"; // any remaining "booking …" that isn't the engine
   return "Other";
 }
 function toDate(v) {
@@ -338,22 +342,36 @@ function ingestSheet(rows, ctx) {
         let propName = "";
         for (const r of rows) { const arr = r || []; const j = arr.findIndex((c) => norm(c) === "property"); if (j >= 0) { for (let k = j + 1; k < arr.length; k++) { if (String(arr[k] ?? "").trim()) { propName = String(arr[k]).trim(); break; } } if (propName) break; } }
         const prop = ctx.propOverride || classifyListing(propName) || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename);
-        const yr = new Date().getFullYear();
+        // This is a YoY comparison export: a "This year" block (rooms/rev/adr) and a "Last year" block.
+        // Find the SECOND revenue/rooms columns for last year. cRev/cRooms above caught the first (TY).
+        let cRevLY = -1, cRoomsLY = -1;
+        for (let i = 0; i <= stayRow && i < N.length; i++) {
+          N[i].forEach((c, j) => {
+            if ((c === "total room revenue" || c === "room revenue") && j > cRev && cRevLY < 0) cRevLY = j;
+            if (c === "rooms sold" && j > cRooms && cRoomsLY < 0) cRoomsLY = j;
+          });
+        }
+        const thisYr = new Date().getFullYear(), lastYr = thisYr - 1;
         let curMonth = null; const parsed = [];
         for (let i = stayRow + 1; i < rows.length; i++) {
           const r = rows[i]; if (!r) continue;
           const mlabel = norm(r[cStay]).slice(0, 3);
-          if (MONTH_IDX[mlabel] != null) curMonth = MONTH_IDX[mlabel]; // carry forward merged month
+          if (MONTH_IDX[mlabel] != null) curMonth = MONTH_IDX[mlabel]; // carry forward merged month cell
           if (curMonth == null) continue;
+          // The SPECIFIC channel lives in the reservation-source column (col cSrc), e.g. "Booking.com",
+          // "Website/Booking Engine", "Airbnb (API)". The category col (Direct/OTA) is only a grouping
+          // header and must NOT be used as the channel name.
           const srcRaw = r[cSrc]; const sn = norm(srcRaw);
-          if (!sn || sn === "-") continue; // subtotal / empty row
-          const rev = num(r[cRev]); if (rev == null) continue;
-          const rooms = cRooms >= 0 ? (num(r[cRooms]) || 0) : 0;
-          parsed.push({ month: mkey(yr, curMonth), year: yr, mIdx: curMonth, revenue: rev, nights: rooms, source: sourceLabel(srcRaw) });
+          if (!sn || sn === "-" || sn === "reservation source") continue; // subtotal / header / empty
+          const src = sourceLabel(srcRaw);
+          // This year
+          const revTY = num(r[cRev]);
+          if (revTY != null && revTY !== 0) parsed.push({ month: mkey(thisYr, curMonth), year: thisYr, mIdx: curMonth, revenue: revTY, nights: cRooms >= 0 ? (num(r[cRooms]) || 0) : 0, source: src });
+          // Last year (read all prior-year data, however sparse)
+          if (cRevLY >= 0) { const revLY = num(r[cRevLY]); if (revLY != null && revLY !== 0) parsed.push({ month: mkey(lastYr, curMonth), year: lastYr, mIdx: curMonth, revenue: revLY, nights: cRoomsLY >= 0 ? (num(r[cRoomsLY]) || 0) : 0, source: src }); }
         }
         if (parsed.length) {
           if (prop) return parsed.map((p) => ({ kind: "res", prop, ...p }));
-          // We read the channel report but it names no property — summarize and ask the user to assign one.
           const channels = {}; const monthsSet = new Set(); let totalRevenue = 0;
           parsed.forEach((p) => { channels[p.source] = (channels[p.source] || 0) + p.revenue; monthsSet.add(MONTHS[p.mIdx]); totalRevenue += p.revenue; });
           return [{ kind: "needprop", report: "channel mix", months: [...monthsSet], totalRevenue, channels }];
@@ -657,8 +675,16 @@ function deriveProperty(pid, model, metaOverride) {
   const headline = p.monthly || {};
   const chan = p.channelMonthly || {};
   const monthly = {};
+  const revDisc = {}; // months where RevPAR headline and channel-report revenue disagree materially
   for (const k of new Set([...Object.keys(headline), ...Object.keys(chan)])) {
-    if (k in headline) monthly[k] = headline[k];      // RevPAR/whole-portfolio is authoritative — even a real $0
+    if (k in headline) {
+      monthly[k] = headline[k];      // RevPAR/whole-portfolio is authoritative — even a real $0
+      // If a channel report ALSO covers this month, note any material disagreement (>2% and >$100)
+      if (chan[k] && chan[k].revenue != null) {
+        const hv = headline[k].revenue || 0, cv = chan[k].revenue || 0;
+        if (Math.abs(hv - cv) > 100 && (hv === 0 || Math.abs(hv - cv) / Math.abs(hv) > 0.02)) revDisc[k] = { headline: hv, channel: cv };
+      }
+    }
     else monthly[k] = { revenue: chan[k].revenue || 0, nights: chan[k].nights || 0 }; // channel only fills months with no headline source
   }
   const keys = Object.keys(monthly).filter((k) => !k.endsWith("-00")).sort();
@@ -744,7 +770,7 @@ function deriveProperty(pid, model, metaOverride) {
   const otaByMonth = p.otaByMonth || {};
   const goal = (model.goals && model.goals[pid] != null) ? model.goals[pid] : (meta.goal || null);
 
-  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
 }
 // Combine several properties into one derived object (Khorrami "All", or the whole portfolio).
 // Pools correctly: sums revenue + nights per month, then recomputes occ/ADR/RevPAR against the
@@ -1504,6 +1530,11 @@ function MetricsSquares({ d, accent, ctl }) {
               <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .5 }}>{m.icon}{m.label}</div>
               <div style={{ fontFamily: "Georgia,serif", fontSize: 26, fontWeight: 700, marginTop: 6, color: (m.id === "occ" && st.value > 1.0001) ? C.bad : undefined }}>{m.fmt(st.value)}</div>
               {m.id === "occ" && st.value > 1.0001 && <div className="ui" style={{ fontSize: 10.5, color: C.bad, fontWeight: 700, marginTop: 2 }}>⚠ over 100% — check unit count on the Units page</div>}
+              {m.id === "revenue" && period === "mtd" && (() => {
+                const now2 = new Date(); const k = `${now2.getFullYear()}-${String(now2.getMonth() + 1).padStart(2, "0")}`;
+                const disc = d.revDisc && d.revDisc[k];
+                return disc ? <div className="ui" style={{ fontSize: 10.5, color: "#b7791f", fontWeight: 600, marginTop: 3, lineHeight: 1.35 }}>⚠ RevPAR {fmtMoney(disc.headline)} · channel report {fmtMoney(disc.channel)}</div> : null;
+              })()}
               <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 3 }}>{periodTag}</div>
               <div className="ui" style={{ fontSize: 12, marginTop: 4 }}>
                 {c.dl != null ? <span style={{ color: c.dl >= 0 ? C.good : C.bad, fontWeight: 700 }}>{c.dl >= 0 ? "▲" : "▼"} {Math.abs(c.dl * 100).toFixed(1)}% {c.kind}</span> : <span style={{ color: C.faint }}>— {c.kind}</span>}
