@@ -54,9 +54,9 @@ const PROP_BY_ID = Object.fromEntries(PROPERTIES.map((p) => [p.id, p]));
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_IDX = Object.fromEntries(MONTHS.map((m, i) => [m.toLowerCase(), i]));
-const OTA_COLORS = { Airbnb: "#e23b3b", Vrbo: "#1668e3", Expedia: "#f5c518", "Booking.com": "#f08a24", Direct: "#1f7a4d", Other: "#94a3b8" };
+const OTA_COLORS = { Airbnb: "#e23b3b", Vrbo: "#5cb3f0", Expedia: "#f5c518", "Booking.com": "#003580", Direct: "#1f7a4d", Other: "#94a3b8" };
 
-const MODEL = { properties: {}, ads: {}, events: [], eventsSource: "none", lastUpdated: null, goals: {}, activity: [], deals: [], roster: null };
+const MODEL = { properties: {}, ads: {}, events: [], eventsSource: "none", lastUpdated: null, goals: {}, activity: [], deals: [], roster: null, sources: {} };
 
 // World Cup window + AT&T Stadium (Dallas Stadium), Arlington fixtures
 const WC_START = "2026-06-12", WC_END = "2026-07-15";
@@ -186,17 +186,24 @@ function guessPropertyFromFilename(fn) {
   }
   return null;
 }
+// Hostfully embeds the booking date in the Source cell: "Airbnb 12/22/25" -> Dec 22 2025
+function bookingDateFrom(raw) {
+  const m = String(raw ?? "").match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if (!m) return null;
+  let y = +m[3]; if (y < 100) y += 2000;
+  const d = new Date(y, +m[1] - 1, +m[2]);
+  return isNaN(d) ? null : d;
+}
 function sourceLabel(raw) {
   const n = norm(raw);
   if (n.includes("airbnb")) return "Airbnb";
   if (n.includes("vrbo") || n.includes("homeaway")) return "Vrbo";
   if (n.includes("expedia")) return "Expedia";
-  if (n.includes("website") || n.includes("engine")) return "Website/Booking Engine"; // before booking.com — this name contains "booking"
-  if (n.includes("booking.com") || n === "booking" || n.includes("booking com")) return "Booking.com";
-  if (n.includes("walk")) return "Walk-In";
-  if (n.includes("phone")) return "Phone";
-  if (n.includes("direct") || n.includes("hostfully") || n.includes("cloudbeds") || n.includes("manual")) return "Direct";
-  if (n.includes("booking")) return "Booking.com"; // any remaining "booking …" that isn't the engine
+  // Direct = everything the property books itself: website/booking engine, walk-in, phone, manual.
+  // Checked BEFORE booking.com because "Website/Booking Engine" contains the word "booking".
+  if (n.includes("website") || n.includes("engine") || n.includes("walk") || n.includes("phone") ||
+      n.includes("direct") || n.includes("hostfully") || n.includes("cloudbeds") || n.includes("manual")) return "Direct";
+  if (n.includes("booking")) return "Booking.com";
   return "Other";
 }
 function toDate(v) {
@@ -424,9 +431,17 @@ function ingestSheet(rows, ctx) {
         spans.push({ yy: d.getFullYear(), mm: d.getMonth(), n: nights || 0 });
       }
       const src = sourceLabel(r[cSrc]);
-      spans.forEach(({ yy, mm, n }) => {
+      // Hostfully puts the BOOKING date inside the Source cell, e.g. "Airbnb 12/22/25". That gives us
+      // booking lead time (how far ahead guests book) and, with it, pace/pickup — no extra report needed.
+      const booked = bookingDateFrom(r[cSrc]);
+      const lead = booked ? Math.round((d - booked) / 86400000) : null;
+      spans.forEach(({ yy, mm, n }, si) => {
         const share = nights > 0 ? n / nights : 1;
-        out.push({ kind: "res", prop, month: mkey(yy, mm), year: yy, mIdx: mm, revenue: rev * share, nights: n, source: src });
+        const rec = { kind: "res", prop, month: mkey(yy, mm), year: yy, mIdx: mm, revenue: rev * share, nights: n, source: src };
+        // Attach stay-level stats to the FIRST span only, so length-of-stay and lead time aren't
+        // counted twice when a booking straddles two months.
+        if (si === 0) { rec.los = nights || 0; if (lead != null && lead >= 0 && lead < 800) rec.lead = lead; }
+        out.push(rec);
       });
     }
     return out;
@@ -560,7 +575,7 @@ function applyRecords(model, records) {
     const p = (next.properties[pid] = next.properties[pid] || { monthly: {}, channelMonthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
     p.otaByMonth = p.otaByMonth || {}; p.channelMonthly = p.channelMonthly || {};
     for (const m of touch[pid].months) { delete p.monthly[m]; }
-    for (const m of touch[pid].channelMonths) { delete p.channelMonthly[m]; delete p.otaByMonth[m]; }
+    for (const m of touch[pid].channelMonths) { delete p.channelMonthly[m]; delete p.otaByMonth[m]; if (p.resStats) delete p.resStats[m]; }
     if (touch[pid].wcDates.size) { p.wc = p.wc || {}; for (const dte of touch[pid].wcDates) delete p.wc[dte]; }
     if (touch[pid].pace) p.pace = null;
     if (touch[pid].snapshot) p.snapshot = null;
@@ -624,6 +639,19 @@ function applyRecords(model, records) {
         const obm = (p.otaByMonth = p.otaByMonth || {});
         const mo = (obm[rec.month] = obm[rec.month] || {});
         mo[rec.source] = (mo[rec.source] || 0) + rec.revenue;
+        // Stay-level stats for booking window / length of stay / pickup curve
+        if (rec.los != null || rec.lead != null) {
+          const rs = (p.resStats = p.resStats || {});
+          const st = (rs[rec.month] = rs[rec.month] || { n: 0, losSum: 0, losHist: {}, leadSum: 0, leadN: 0, leadHist: {}, leadNights: {} });
+          st.n++;
+          if (rec.los != null) { st.losSum += rec.los; const b = rec.los <= 1 ? "1" : rec.los <= 2 ? "2" : rec.los <= 3 ? "3" : rec.los <= 6 ? "4-6" : rec.los <= 13 ? "7-13" : "14+"; st.losHist[b] = (st.losHist[b] || 0) + 1; }
+          if (rec.lead != null) {
+            st.leadSum += rec.lead; st.leadN++;
+            const b = rec.lead <= 0 ? "same day" : rec.lead <= 3 ? "1-3d" : rec.lead <= 7 ? "4-7d" : rec.lead <= 14 ? "8-14d" : rec.lead <= 30 ? "15-30d" : rec.lead <= 60 ? "31-60d" : rec.lead <= 90 ? "61-90d" : "90d+";
+            st.leadHist[b] = (st.leadHist[b] || 0) + 1;
+            st.leadNights[b] = (st.leadNights[b] || 0) + (rec.los || 0);
+          }
+        }
       } else {
         const cur = (p.monthly[rec.month] = p.monthly[rec.month] || { revenue: 0, nights: 0 });
         cur.revenue = rec.revenue;
@@ -770,7 +798,7 @@ function deriveProperty(pid, model, metaOverride) {
   const otaByMonth = p.otaByMonth || {};
   const goal = (model.goals && model.goals[pid] != null) ? model.goals[pid] : (meta.goal || null);
 
-  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, resStats: p.resStats || {}, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
 }
 // Combine several properties into one derived object (Khorrami "All", or the whole portfolio).
 // Pools correctly: sums revenue + nights per month, then recomputes occ/ADR/RevPAR against the
@@ -1059,6 +1087,18 @@ function Dashboard() {
             const before = m;
             const after = applyRecords(m, records);
             after.activity = buildActivity(before, after, file.name).concat(after.activity || []).slice(0, 40);
+            // Freshness log: which property + report type this file refreshed, when, and the newest
+            // month it covered. Lets the dashboard flag a stale RevPAR sitting next to a fresh channel file.
+            after.sources = { ...(after.sources || {}) };
+            const byProp = {};
+            records.forEach((r) => { if (!r.prop) return; (byProp[r.prop] = byProp[r.prop] || []).push(r); });
+            const kindLabel = (rs) => rs.some((r) => r.kind === "monthly" || r.kind === "listingmonth") ? "RevPAR / monthly" : rs.some((r) => r.kind === "res") ? "Channel / reservations" : rs[0]?.kind || "other";
+            Object.entries(byProp).forEach(([pid, rs]) => {
+              const months = rs.map((r) => r.month).filter(Boolean).sort();
+              const label = kindLabel(rs);
+              const key = `${pid}::${label}`;
+              after.sources[key] = { pid, report: label, file: file.name, uploadedAt: new Date().toISOString(), latestMonth: months[months.length - 1] || null, records: rs.length };
+            });
             return after;
           });
           added += records.length;
@@ -1153,6 +1193,7 @@ function Dashboard() {
           ))}
           <div style={{ fontSize: 10, letterSpacing: 2, color: "#6c7d96", margin: "16px 8px 6px", fontWeight: 700 }}>INTELLIGENCE</div>
           <NavItem icon={<AlertTriangle size={17} />} label="Alerts" active={page === "alerts"} onClick={() => setPage("alerts")} color="#8ea0b8" notify={alertCount} />
+          <NavItem icon={<Activity size={17} />} label="Data freshness" active={page === "freshness"} onClick={() => setPage("freshness")} color="#8ea0b8" />
           <NavItem icon={<Building2 size={17} />} label="Units" active={page === "units"} onClick={() => setPage("units")} color="#8ea0b8" />
           <NavItem icon={<Calendar size={17} />} label="Events" active={page === "events"} onClick={() => setPage("events")} color="#8ea0b8" />
           <NavItem icon={<TrendingUp size={17} />} label="Ad Performance" active={page === "ads"} onClick={() => setPage("ads")} color="#8ea0b8" />
@@ -1219,6 +1260,7 @@ function Dashboard() {
                 : page === "khorrami" ? <KhorramiPage model={model} setModel={setModel} />
                 : page === "alerts" ? <AlertsPage model={model} />
                 : page === "units" ? <UnitsPage model={model} setModel={setModel} canEdit={canEdit} />
+                : page === "freshness" ? <FreshnessPage model={model} />
                 : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={model} goto={setPage} />
                 : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
                   : page === "ask" ? <AskPage model={model} />
@@ -2056,7 +2098,8 @@ function PropertyPage({ pid, model, setModel }) {
         <Panel title="RevPAR trend"><TrendChart series={d.series} dataKey="revpar" color={meta.color} fmt={(v) => "$" + v.toFixed(0)} /></Panel>
       </div>
       <div style={{ marginTop: 16 }}><HealthBoard derived={[d]} goto={() => {}} title="Property health" /></div>
-      <div style={{ marginTop: 16 }}><PacePanel derived={[d]} title="Pace & pickup" /></div>
+      <div style={{ marginTop: 16 }}><PickupPanel d={d} /></div>
+      <div style={{ marginTop: 16 }}><StayPatternsPanel d={d} /></div>
       <div style={{ marginTop: 16 }}><ChannelOverTime derived={[d]} /></div>
       {deriveAds(model, pid) && <div style={{ marginTop: 16 }}><AdPanel ads={deriveAds(model, pid)} color={meta.color} /></div>}
       <div style={{ marginTop: 16 }}><YoyReport d={d} /></div>
@@ -2353,6 +2396,147 @@ function UnitsPage({ model, setModel, canEdit }) {
         })}
       </div>
     </div>
+  );
+}
+
+function FreshnessPage({ model }) {
+  const src = model.sources || {};
+  const rows = Object.values(src).sort((a, b) => (a.pid || "").localeCompare(b.pid || ""));
+  const now = new Date();
+  const ageDays = (iso) => Math.floor((now - new Date(iso)) / 86400000);
+  const monthLabel = (k) => { if (!k) return "—"; const [y, m] = k.split("-").map(Number); return `${MONTHS[m - 1]} ${y}`; };
+  // group by property so a stale RevPAR next to a fresh channel file is obvious
+  const byProp = {};
+  rows.forEach((r) => { (byProp[r.pid] = byProp[r.pid] || []).push(r); });
+  return (
+    <div>
+      <SectionTitle sub="When each report was last uploaded, and the newest month it covered. Reports of different ages for the same property are the usual cause of numbers that disagree.">Data freshness</SectionTitle>
+      {!rows.length ? <Panel title="No uploads recorded yet"><Empty text="Upload a report and it will be logged here." /></Panel> : (
+        <div style={{ display: "grid", gap: 12 }}>
+          {PROPERTIES.filter((p) => byProp[p.id]).map((p) => {
+            const list = byProp[p.id];
+            const months = list.map((r) => r.latestMonth).filter(Boolean);
+            const mismatch = new Set(months).size > 1;
+            return (
+              <Panel key={p.id} title={p.name}>
+                {mismatch && <div className="ui" style={{ marginBottom: 9, padding: "8px 11px", borderRadius: 9, background: "#fff7e8", border: "1px solid #f3e2bf", fontSize: 12.5, color: "#8a6520" }}>
+                  ⚠ Reports cover different periods — the older one is likely stale. Re-pull it so both cover the same date.
+                </div>}
+                <table className="ui" style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
+                  <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .5 }}>
+                    <th style={{ padding: "5px 8px" }}>Report</th><th style={{ padding: "5px 8px" }}>Covers through</th><th style={{ padding: "5px 8px" }}>Uploaded</th><th style={{ padding: "5px 8px" }}>File</th>
+                  </tr></thead>
+                  <tbody>
+                    {list.map((r, i) => {
+                      const age = ageDays(r.uploadedAt);
+                      const stale = age > 7;
+                      return (
+                        <tr key={i} style={{ borderTop: `1px solid ${C.track}` }}>
+                          <td style={{ padding: "6px 8px", fontWeight: 600 }}>{r.report}</td>
+                          <td style={{ padding: "6px 8px" }}>{monthLabel(r.latestMonth)}</td>
+                          <td style={{ padding: "6px 8px", color: stale ? C.bad : C.sub, fontWeight: stale ? 700 : 400 }}>{age === 0 ? "today" : `${age}d ago`}{stale ? " ⚠" : ""}</td>
+                          <td style={{ padding: "6px 8px", color: C.muted, fontSize: 11.5, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.file}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </Panel>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Booking window + length of stay, derived from the booking date Hostfully embeds in the Source cell.
+function StayPatternsPanel({ d }) {
+  const rs = d.resStats || {};
+  const keys = Object.keys(rs).sort();
+  if (!keys.length) return <Panel title="Booking window & length of stay"><Empty text="Needs reservation-level data (Hostfully STR export). Cloudbeds monthly exports don't carry booking dates." /></Panel>;
+  const agg = { n: 0, losSum: 0, leadSum: 0, leadN: 0, losHist: {}, leadHist: {} };
+  keys.forEach((k) => { const st = rs[k]; agg.n += st.n || 0; agg.losSum += st.losSum || 0; agg.leadSum += st.leadSum || 0; agg.leadN += st.leadN || 0;
+    Object.entries(st.losHist || {}).forEach(([b, v]) => agg.losHist[b] = (agg.losHist[b] || 0) + v);
+    Object.entries(st.leadHist || {}).forEach(([b, v]) => agg.leadHist[b] = (agg.leadHist[b] || 0) + v); });
+  const LOS_ORDER = ["1", "2", "3", "4-6", "7-13", "14+"];
+  const LEAD_ORDER = ["same day", "1-3d", "4-7d", "8-14d", "15-30d", "31-60d", "61-90d", "90d+"];
+  const losData = LOS_ORDER.filter((b) => agg.losHist[b]).map((b) => ({ name: b === "1" ? "1 night" : b + (b.includes("+") || b.includes("-") ? " nights" : " nights"), value: agg.losHist[b] }));
+  const leadData = LEAD_ORDER.filter((b) => agg.leadHist[b]).map((b) => ({ name: b, value: agg.leadHist[b] }));
+  const avgLos = agg.n ? agg.losSum / agg.n : null;
+  const avgLead = agg.leadN ? agg.leadSum / agg.leadN : null;
+  return (
+    <Panel title="Booking window & length of stay">
+      <div className="ui" style={{ display: "flex", gap: 22, marginBottom: 12, flexWrap: "wrap" }}>
+        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Avg stay</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{avgLos != null ? avgLos.toFixed(1) + " nights" : "—"}</div></div>
+        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Avg booking window</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{avgLead != null ? Math.round(avgLead) + " days" : "—"}</div></div>
+        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Bookings analysed</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{agg.n.toLocaleString()}</div></div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <div>
+          <div className="ui" style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 6 }}>How far ahead guests book</div>
+          <ResponsiveContainer width="100%" height={190}>
+            <BarChart data={leadData} margin={{ top: 4, right: 6, left: -14, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} interval={0} angle={-30} textAnchor="end" height={48} />
+              <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} />
+              <Tooltip formatter={(v) => v + " bookings"} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+              <Bar dataKey="value" fill={d.meta.color} radius={[5, 5, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div>
+          <div className="ui" style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 6 }}>Length of stay</div>
+          <ResponsiveContainer width="100%" height={190}>
+            <BarChart data={losData} margin={{ top: 4, right: 6, left: -14, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} interval={0} angle={-30} textAnchor="end" height={48} />
+              <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} />
+              <Tooltip formatter={(v) => v + " bookings"} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+              <Bar dataKey="value" fill={d.meta.color} radius={[5, 5, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+// Pickup curve: nights on the books by how far ahead they were booked, this year vs same month last year.
+function PickupPanel({ d }) {
+  const rs = d.resStats || {};
+  const now = new Date();
+  const curKey = mkey(now.getFullYear(), now.getMonth());
+  const lyKey = mkey(now.getFullYear() - 1, now.getMonth());
+  const cur = rs[curKey], ly = rs[lyKey];
+  if (!cur) return <Panel title="Pace & pickup"><Empty text="Needs reservation-level data with booking dates for the current month." /></Panel>;
+  const ORDER = ["90d+", "61-90d", "31-60d", "15-30d", "8-14d", "4-7d", "1-3d", "same day"];
+  let ca = 0, la = 0;
+  const data = ORDER.map((b) => {
+    ca += (cur.leadNights?.[b] || 0);
+    la += (ly?.leadNights?.[b] || 0);
+    return { name: b, thisYear: ca, lastYear: ly ? la : null };
+  });
+  const totalCur = ca, totalLy = la;
+  const dl = (ly && totalLy) ? (totalCur - totalLy) / totalLy : null;
+  return (
+    <Panel title={`Pace & pickup — ${MONTHS[now.getMonth()]} ${now.getFullYear()}`}>
+      <div className="ui" style={{ fontSize: 12.5, color: C.sub, marginBottom: 10 }}>
+        Nights on the books, accumulating from the earliest bookings to the latest.
+        {ly ? <> Same month last year for comparison — <b style={{ color: dl >= 0 ? C.good : C.bad }}>{dl != null ? (dl >= 0 ? "▲ " : "▼ ") + Math.abs(dl * 100).toFixed(0) + "%" : "—"}</b> vs last year.</> : " No prior-year data for this month yet."}
+      </div>
+      <ResponsiveContainer width="100%" height={230}>
+        <ComposedChart data={data} margin={{ top: 6, right: 8, left: -10, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+          <XAxis dataKey="name" tick={{ fontSize: 10.5, fill: C.muted }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <Tooltip formatter={(v) => v == null ? "—" : v + " nights"} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          {ly && <Line type="monotone" dataKey="lastYear" stroke="#b8c0cc" strokeWidth={2} dot={false} name="Last year" />}
+          <Line type="monotone" dataKey="thisYear" stroke={d.meta.color} strokeWidth={2.5} dot={{ r: 3 }} name="This year" />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </Panel>
   );
 }
 
