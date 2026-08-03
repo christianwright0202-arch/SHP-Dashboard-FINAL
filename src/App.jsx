@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis,
-  CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, AreaChart,
+  CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, AreaChart, ReferenceLine,
 } from "recharts";
 import * as XLSX from "xlsx";
+import { loadModel, saveModel, modelHasData, listBackups, restoreBackup } from "./storage";
 import {
   Upload, TrendingUp, TrendingDown, AlertTriangle, Calendar, Sparkles,
   LayoutGrid, Building2, MessageSquare, Send, RefreshCw, Trash2, FileText,
-  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target,
+  DollarSign, Percent, BedDouble, Gauge, Loader2, ChevronRight, X, Target, Search, MapPin, Activity, Trophy, Briefcase, Plus, Eye, Lock,
 } from "lucide-react";
 
 /* ============================================================
@@ -19,7 +20,7 @@ const C = {
   panel: "#ffffff",
   border: "#e2e5e9",
   borderStrong: "#d3d7dd",
-  ink: "#1b2330",
+  ink: "#14274d",
   sub: "#566273",
   muted: "#6b7280",
   faint: "#9aa1ad",
@@ -29,20 +30,49 @@ const C = {
   track: "#f3f4f6",
 };
 
-const PROPERTIES = [
-  { id: "soma", name: "Hotel SOMA", short: "SOMA", color: "#e07b1f", location: "Fort Worth", units: 31, market: "fortworth", match: /soma/i },
-  { id: "rambler", name: "The Rambler Inn", short: "Rambler", color: "#cf3a3a", location: "Fort Worth", units: 22, market: "fortworth", match: /rambler/i },
-  { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 18, market: "arlington", match: /(ballpark|rogers|ryan)/i },
-  { id: "kress", name: "Kress", short: "Kress", color: "#1f7a4d", location: "Fort Worth", units: 7, market: "fortworth", match: /kress/i },
-  { id: "harley", name: "Harley", short: "Harley", color: "#6a3da8", location: "Fort Worth", units: 3, market: "fortworth", match: /harley/i },
+const REGIONS = [
+  { id: "fortworth", name: "Fort Worth" },
+  { id: "arlington", name: "Arlington" },
 ];
+const PROPERTIES = [
+  // Fort Worth
+  { id: "soma", name: "Hotel SOMA", short: "SOMA", color: "#e07b1f", location: "Fort Worth", units: 35, market: "fortworth", goal: 100000, match: /soma/i, compareMode: "mom" },
+  { id: "kress", name: "Kress", short: "Kress", color: "#1f7a4d", location: "Fort Worth", units: 9, market: "fortworth", goal: 45000, match: /kress/i, compareMode: "yoy" },
+  { id: "harley", name: "Harley", short: "Harley", color: "#6a3da8", location: "Fort Worth", units: 3, market: "fortworth", goal: 30000, match: /harley/i, compareMode: "yoy" },
+  // Arlington
+  { id: "rambler", name: "The Rambler Inn", short: "Rambler", color: "#cf3a3a", location: "Arlington", units: 24, market: "arlington", goal: 100000, match: /rambler/i, compareMode: "yoy" },
+  { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 14, market: "arlington", goal: 60000, match: /(ballpark|ryan)/i, compareMode: "yoy" },
+  { id: "woodbrook", name: "Woodbrook", short: "Woodbrook", color: "#138a8a", location: "Arlington", units: 1, market: "arlington", goal: 8000, match: /woodbrook/i, compareMode: "mom", group: "khorrami" },
+  { id: "rogers", name: "Rogers", short: "Rogers", color: "#b5651d", location: "Arlington", units: 2, market: "arlington", goal: 16000, match: /rogers/i, compareMode: "mom", group: "khorrami" },
+];
+// Khorrami = combined Woodbrook + Rogers view (shown as one Arlington tab with an All/Woodbrook/Rogers toggle)
+const KHORRAMI = { id: "khorrami", name: "Khorrami", short: "Khorrami", color: "#0f766e", location: "Arlington", market: "arlington", members: ["woodbrook", "rogers"], units: 3, compareMode: "mom" };
+// Default OTA commission rates for net-of-fee view (editable assumption)
+const CHANNEL_FEES = { Airbnb: 0.15, Vrbo: 0.08, Expedia: 0.17, "Booking.com": 0.15, Direct: 0, Other: 0.12 };
+const PROPS_IN = (region) => PROPERTIES.filter((p) => p.market === region);
 const PROP_BY_ID = Object.fromEntries(PROPERTIES.map((p) => [p.id, p]));
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_IDX = Object.fromEntries(MONTHS.map((m, i) => [m.toLowerCase(), i]));
-const OTA_COLORS = { Airbnb: "#ff5a5f", Vrbo: "#1668e3", "Booking.com": "#003580", Expedia: "#fdb913", Direct: "#1f7a4d", Other: "#94a3b8" };
+const OTA_COLORS = { Airbnb: "#e23b3b", Vrbo: "#5cb3f0", Expedia: "#f5c518", "Booking.com": "#003580", Direct: "#1f7a4d", Other: "#94a3b8" };
 
-const MODEL = { properties: {}, events: [], eventsSource: "none", lastUpdated: null };
+const MODEL = { properties: {}, ads: {}, events: [], eventsSource: "none", lastUpdated: null, goals: {}, activity: [], deals: [], roster: null, sources: {}, budgets: null };
+
+// World Cup window + AT&T Stadium (Dallas Stadium), Arlington fixtures
+const WC_START = "2026-06-12", WC_END = "2026-07-15";
+const WORLD_CUP_MATCHES = [
+  { date: "2026-06-14", teams: "Netherlands vs Japan", round: "Group", tier: 2 },
+  { date: "2026-06-17", teams: "England vs Croatia", round: "Group", tier: 3 },
+  { date: "2026-06-22", teams: "Argentina vs Austria", round: "Group", tier: 3 },
+  { date: "2026-06-25", teams: "Group Stage (TBD)", round: "Group", tier: 1 },
+  { date: "2026-06-27", teams: "Argentina vs Jordan", round: "Group", tier: 3 },
+  { date: "2026-06-30", teams: "Round of 32", round: "Knockout", tier: 2 },
+  { date: "2026-07-03", teams: "Round of 32", round: "Knockout", tier: 2 },
+  { date: "2026-07-06", teams: "Round of 16", round: "Knockout", tier: 3 },
+  { date: "2026-07-14", teams: "Semifinal", round: "Knockout", tier: 4 },
+];
+const WC_MATCH_BY_DATE = Object.fromEntries(WORLD_CUP_MATCHES.map((m) => [m.date, m]));
+const WC_TIER_COLOR = { 1: "#9aa1ad", 2: "#3b7dd8", 3: "#e07b1f", 4: "#c0392b" };
 
 /* ---------------- parsing helpers ---------------- */
 const num = (v) => {
@@ -62,6 +92,85 @@ const pct = (v) => {
   return n;
 };
 const daysInMonth = (year, mIdx) => new Date(year, mIdx + 1, 0).getDate();
+
+/* ---------------- UNIT ROSTER ----------------
+   Occupancy = occupied unit-nights / AVAILABLE unit-nights. Availability is computed day-by-day
+   from this roster, so units that come online or get offboarded mid-month are counted for exactly
+   the days they were live. Dates are inclusive; null start = "always was", null end = "still live".
+   Onboarding dates below were derived from first-booking dates in the real reports and verified;
+   offboarding dates were confirmed by Christian. This roster is editable in the app (Units page).
+------------------------------------------------ */
+const DEFAULT_ROSTER = {
+  // Hotels / RevPAR-sourced properties: flat count, no per-unit dates needed
+  soma: { mode: "flat", flat: 35 },
+  rambler: { mode: "flat", flat: 24 },
+  harley: { mode: "flat", flat: 3 },
+  woodbrook: { mode: "flat", flat: 1 },
+  rogers: { mode: "flat", flat: 2 },
+  // Kress: 7 units → 402 online May 2025 → 8; 201 online Feb 2026 → 9
+  kress: { mode: "list", units: [
+    { name: "Kress - 306", start: null, end: null },
+    { name: "Kress - 307", start: null, end: null },
+    { name: "Kress - 308", start: null, end: null },
+    { name: "Kress - 404", start: null, end: null },
+    { name: "Kress - 406", start: null, end: null },
+    { name: "Kress - 407", start: null, end: null },
+    { name: "Kress - 408", start: null, end: null },
+    { name: "Kress - 402", start: "2025-05-01", end: null },
+    { name: "Kress - 201", start: "2026-02-01", end: null },
+  ] },
+  // The Ryan: 18 units → 809/807/804 offboarded 6/30/26 → 15 → 808 offboarded 7/11/26 → 14 (current).
+  ryan: { mode: "list", units: [
+    { name: "Ballpark 701", start: null, end: null },
+    { name: "Ballpark 705", start: null, end: null },
+    { name: "Ballpark 706", start: null, end: null },
+    { name: "Ballpark 707", start: null, end: null },
+    { name: "Ballpark 708", start: null, end: null },
+    { name: "Ballpark 709", start: null, end: null },
+    { name: "Ballpark 803", start: null, end: null },
+    { name: "Ballpark 805", start: null, end: null },
+    { name: "Ballpark 902", start: null, end: null },
+    { name: "Ballpark 903", start: null, end: null },
+    { name: "Ballpark 904", start: null, end: null },
+    { name: "Ballpark 906", start: null, end: null },
+    { name: "Ballpark 908", start: null, end: null },
+    { name: "Ballpark 809", start: null, end: "2026-06-30" },
+    { name: "Ballpark 807", start: null, end: "2026-06-30" },
+    { name: "Ballpark 804", start: null, end: "2026-06-30" },
+    { name: "Ballpark 808", start: null, end: "2026-07-11" },
+    { name: "Ballpark 905", start: null, end: null },
+  ] },
+};
+const parseISO = (s) => { if (!s) return null; const [y, m, d] = String(s).split("-").map(Number); return new Date(y, (m || 1) - 1, d || 1); };
+// Available unit-NIGHTS for one property in one month, counted day by day.
+function availUnitNights(pid, year, mIdx, model) {
+  const r = (model && model.roster && model.roster[pid]) || DEFAULT_ROSTER[pid];
+  const days = daysInMonth(year, mIdx);
+  if (!r) { const u = PROP_BY_ID[pid]?.units || 0; return u * days; }
+  if (r.mode === "flat") return (r.flat || 0) * days;
+  let total = 0;
+  const mStart = new Date(year, mIdx, 1), mEnd = new Date(year, mIdx, days);
+  (r.units || []).forEach((u) => {
+    const s = parseISO(u.start) || new Date(1900, 0, 1);
+    const e = parseISO(u.end) || new Date(2999, 11, 31);
+    const from = s > mStart ? s : mStart, to = e < mEnd ? e : mEnd;
+    if (to >= from) total += Math.round((to - from) / 86400000) + 1;
+  });
+  return total;
+}
+// How many distinct units were live at any point in this month (for display/audit)
+function unitsActive(pid, year, mIdx, model) {
+  const r = (model && model.roster && model.roster[pid]) || DEFAULT_ROSTER[pid];
+  if (!r) return PROP_BY_ID[pid]?.units || 0;
+  if (r.mode === "flat") return r.flat || 0;
+  const days = daysInMonth(year, mIdx);
+  const mStart = new Date(year, mIdx, 1), mEnd = new Date(year, mIdx, days);
+  return (r.units || []).filter((u) => {
+    const s = parseISO(u.start) || new Date(1900, 0, 1);
+    const e = parseISO(u.end) || new Date(2999, 11, 31);
+    return e >= mStart && s <= mEnd;
+  }).length;
+}
 const norm = (s) => String(s ?? "").toLowerCase().trim();
 
 function classifyListing(name) {
@@ -77,13 +186,24 @@ function guessPropertyFromFilename(fn) {
   }
   return null;
 }
+// Hostfully embeds the booking date in the Source cell: "Airbnb 12/22/25" -> Dec 22 2025
+function bookingDateFrom(raw) {
+  const m = String(raw ?? "").match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if (!m) return null;
+  let y = +m[3]; if (y < 100) y += 2000;
+  const d = new Date(y, +m[1] - 1, +m[2]);
+  return isNaN(d) ? null : d;
+}
 function sourceLabel(raw) {
   const n = norm(raw);
   if (n.includes("airbnb")) return "Airbnb";
   if (n.includes("vrbo") || n.includes("homeaway")) return "Vrbo";
-  if (n.includes("booking")) return "Booking.com";
   if (n.includes("expedia")) return "Expedia";
-  if (n.includes("direct") || n.includes("website") || n.includes("hostfully") || n.includes("cloudbeds")) return "Direct";
+  // Direct = everything the property books itself: website/booking engine, walk-in, phone, manual.
+  // Checked BEFORE booking.com because "Website/Booking Engine" contains the word "booking".
+  if (n.includes("website") || n.includes("engine") || n.includes("walk") || n.includes("phone") ||
+      n.includes("direct") || n.includes("hostfully") || n.includes("cloudbeds") || n.includes("manual")) return "Direct";
+  if (n.includes("booking")) return "Booking.com";
   return "Other";
 }
 function toDate(v) {
@@ -93,6 +213,23 @@ function toDate(v) {
   return isNaN(d) ? null : d;
 }
 const mkey = (y, mIdx) => `${y}-${String(mIdx + 1).padStart(2, "0")}`;
+const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const parseUnits = (name) => { const m = String(name || "").match(/--\s*(\d+)\s*units/i); return m ? +m[1] : 1; };
+// pull a year-month from a filename like "Bookingcom_SOMA_2026-06.csv"
+function monthFromFilename(fn) {
+  const s = String(fn || "");
+  let m = s.match(/(20\d\d)[-_.]?(0[1-9]|1[0-2])(?!\d)/); if (m) return { y: +m[1], m: +m[2] - 1 };
+  const mm = s.toLowerCase().match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?[-_ ]*(20\d\d)?/);
+  if (mm && MONTH_IDX[mm[1]] != null) return { y: mm[2] ? +mm[2] : new Date().getFullYear(), m: MONTH_IDX[mm[1]] };
+  m = s.match(/\b(0[1-9]|1[0-2])[-_.](20\d\d)\b/); if (m) return { y: +m[2], m: +m[1] - 1 };
+  return null;
+}
+const money = (v) => { const n = parseFloat(String(v ?? "").replace(/[$,%\s]/g, "")); return isFinite(n) ? n : 0; };
+function wcDateList() {
+  const out = []; const s = new Date(WC_START + "T00:00"); const e = new Date(WC_END + "T00:00");
+  for (let d = new Date(s); d <= e; d.setDate(d.getDate() + 1)) out.push(isoDate(d));
+  return out;
+}
 
 /* find header row: row containing the most KPI keywords */
 const KW = ["listing", "revenue", "occupancy", "occ", "adr", "revpar", "source", "date", "nights", "accommodations", "check in", "check-in", "af"];
@@ -116,51 +253,248 @@ function colFinder(headers) {
   };
 }
 
+/* find a "Month YYYY" label near the header row (used by the monthly KPI tracker) */
+const MONTH_YEAR_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{4})\b/i;
+function findMonthYearNear(rows, hr) {
+  for (let i = Math.max(0, hr - 3); i <= hr; i++) {
+    for (const cell of (rows[i] || [])) {
+      const m = String(cell).match(MONTH_YEAR_RE);
+      if (m) return { mIdx: MONTH_IDX[m[1].toLowerCase().slice(0, 3)], year: +m[2] };
+    }
+  }
+  return null;
+}
+
 /* Ingest one sheet -> array of normalized records */
 function ingestSheet(rows, ctx) {
   const out = [];
+
+  // AD SPEND REPORTS — Expedia TravelAds (daily, has Date) or Booking.com (campaign totals, no Date)
+  {
+    const N = rows.map((r) => (r || []).map(norm));
+    const hi = N.findIndex((r) => r.some((c) => c.includes("campaign")) && r.some((c) => c === "spend"));
+    if (hi >= 0) {
+      const H = N[hi]; const find = (pred) => H.findIndex(pred);
+      const isExpedia = H.some((c) => c.includes("gross bookings")) || H.includes("date");
+      const isBooking = H.some((c) => c.includes("return on ad spend")) || H.some((c) => c.includes("revenue per booking"));
+      const cCamp = find((c) => c.includes("campaign"));
+      const cSpend = find((c) => c === "spend");
+      if (cCamp >= 0 && cSpend >= 0 && (isExpedia || isBooking)) {
+        const channel = isExpedia ? "Expedia" : "Booking.com";
+        const cRev = isExpedia ? find((c) => c === "gross bookings total") : find((c) => c === "revenue");
+        const cBook = isExpedia ? find((c) => c === "bookings total") : find((c) => c === "bookings");
+        const cDate = find((c) => c === "date");
+        const cImp = find((c) => c === "impressions");
+        const cClicks = find((c) => c === "clicks");
+        const fm = monthFromFilename(ctx.filename);
+        for (let i = hi + 1; i < rows.length; i++) {
+          const r = rows[i]; if (!r) continue;
+          const camp = String(r[cCamp] ?? ""); const cl = norm(camp);
+          if (!cl || cl.includes("grand total") || cl === "total") continue;
+          const prop = classifyListing(camp) || ctx.propOverride; if (!prop) continue;
+          let y, mo;
+          if (cDate >= 0 && r[cDate]) { const dt = r[cDate] instanceof Date ? r[cDate] : toDate(r[cDate]); if (dt && !isNaN(dt.getTime())) { y = dt.getFullYear(); mo = dt.getMonth(); } }
+          if (mo == null && fm) { y = fm.y; mo = fm.m; }
+          if (mo == null) { const now = new Date(); y = now.getFullYear(); mo = now.getMonth(); }
+          const spend = money(r[cSpend]); const rev = cRev >= 0 ? money(r[cRev]) : 0;
+          const bookings = cBook >= 0 ? money(r[cBook]) : 0; const imp = cImp >= 0 ? money(r[cImp]) : 0; const clk = cClicks >= 0 ? money(r[cClicks]) : 0;
+          if (!spend && !rev && !bookings) continue;
+          out.push({ kind: "ad", prop, channel, year: y, mIdx: mo, month: mkey(y, mo), spend, revenue: rev, bookings, impressions: imp, clicks: clk });
+        }
+        if (out.length) return out;
+      }
+    }
+  }
+
   const hr = detectHeader(rows);
   if (hr < 0) return out;
   const headers = rows[hr].map((x) => String(x ?? ""));
   const find = colFinder(headers);
+  const colWhere = (pred) => headers.findIndex((h) => pred(norm(h)));
   const body = rows.slice(hr + 1);
+  const guessProp = () => ctx.propOverride || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename);
+
+  // 0) WORLD CUP daily data (filename flags it; only sheets with a Date column are used)
+  if (/world\s*cup|worldcup/i.test(ctx.filename || "")) {
+    const cList = find("listing"), cDate = find("date"), cOcc = find("occupancy"), cRev = find("rental revenue", "revenue");
+    if (cDate < 0) return out; // skip the totals/overview sheet — recomputed from daily
+    for (const r of body) {
+      const prop = classifyListing(r[cList]) || ctx.propOverride; if (!prop) continue;
+      const d = toDate(r[cDate]); if (!d) continue;
+      const units = parseUnits(r[cList]);
+      const occ = cOcc >= 0 ? (pct(r[cOcc]) || 0) : 0;
+      out.push({ kind: "wc", prop, date: isoDate(d), units, booked: occ * units, revenue: num(r[cRev]) || 0 });
+    }
+    return out;
+  }
+
+  // 0b) CLOUDBEDS-STYLE CHANNEL PRODUCTION (stacked header, leading blank col, merged month cells)
+  {
+    const N = rows.map((r) => (r || []).map(norm));
+    const stayRow = N.findIndex((r) => r.some((c) => c.includes("stay date")));
+    const hasResSrcAnywhere = N.some((r) => r.some((c) => c.includes("reservation source")));
+    if (stayRow >= 0 && hasResSrcAnywhere) {
+      const hrow = N[stayRow];
+      const cStay = hrow.findIndex((c) => c.includes("stay date"));
+      const cCat = hrow.findIndex((c) => c.includes("source category"));
+      const cSrc = hrow.findIndex((c, i) => c.includes("reservation source") && !c.includes("category") && i !== cCat);
+      // "This year" Rooms Sold / Total Room Revenue = leftmost exact matches across the header rows
+      let cRooms = -1, cRev = -1;
+      for (let i = 0; i <= stayRow && i < N.length; i++) {
+        if (cRooms < 0) { const j = N[i].indexOf("rooms sold"); if (j >= 0) cRooms = j; }
+        if (cRev < 0) { const j = N[i].findIndex((c) => c === "total room revenue" || c === "room revenue"); if (j >= 0) cRev = j; }
+      }
+      if (cStay >= 0 && cSrc >= 0 && cRev >= 0) {
+        // property name from a "Property" label row, else filename
+        let propName = "";
+        for (const r of rows) { const arr = r || []; const j = arr.findIndex((c) => norm(c) === "property"); if (j >= 0) { for (let k = j + 1; k < arr.length; k++) { if (String(arr[k] ?? "").trim()) { propName = String(arr[k]).trim(); break; } } if (propName) break; } }
+        const prop = ctx.propOverride || classifyListing(propName) || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename);
+        // This is a YoY comparison export: a "This year" block (rooms/rev/adr) and a "Last year" block.
+        // Find the SECOND revenue/rooms columns for last year. cRev/cRooms above caught the first (TY).
+        let cRevLY = -1, cRoomsLY = -1;
+        for (let i = 0; i <= stayRow && i < N.length; i++) {
+          N[i].forEach((c, j) => {
+            if ((c === "total room revenue" || c === "room revenue") && j > cRev && cRevLY < 0) cRevLY = j;
+            if (c === "rooms sold" && j > cRooms && cRoomsLY < 0) cRoomsLY = j;
+          });
+        }
+        const thisYr = new Date().getFullYear(), lastYr = thisYr - 1;
+        let curMonth = null; const parsed = [];
+        for (let i = stayRow + 1; i < rows.length; i++) {
+          const r = rows[i]; if (!r) continue;
+          const mlabel = norm(r[cStay]).slice(0, 3);
+          if (MONTH_IDX[mlabel] != null) curMonth = MONTH_IDX[mlabel]; // carry forward merged month cell
+          if (curMonth == null) continue;
+          // The SPECIFIC channel lives in the reservation-source column (col cSrc), e.g. "Booking.com",
+          // "Website/Booking Engine", "Airbnb (API)". The category col (Direct/OTA) is only a grouping
+          // header and must NOT be used as the channel name.
+          const srcRaw = r[cSrc]; const sn = norm(srcRaw);
+          if (!sn || sn === "-" || sn === "reservation source") continue; // subtotal / header / empty
+          const src = sourceLabel(srcRaw);
+          // This year
+          const revTY = num(r[cRev]);
+          if (revTY != null && revTY !== 0) parsed.push({ month: mkey(thisYr, curMonth), year: thisYr, mIdx: curMonth, revenue: revTY, nights: cRooms >= 0 ? (num(r[cRooms]) || 0) : 0, source: src });
+          // Last year (read all prior-year data, however sparse)
+          if (cRevLY >= 0) { const revLY = num(r[cRevLY]); if (revLY != null && revLY !== 0) parsed.push({ month: mkey(lastYr, curMonth), year: lastYr, mIdx: curMonth, revenue: revLY, nights: cRoomsLY >= 0 ? (num(r[cRoomsLY]) || 0) : 0, source: src }); }
+        }
+        if (parsed.length) {
+          if (prop) return parsed.map((p) => ({ kind: "res", prop, ...p }));
+          const channels = {}; const monthsSet = new Set(); let totalRevenue = 0;
+          parsed.forEach((p) => { channels[p.source] = (channels[p.source] || 0) + p.revenue; monthsSet.add(MONTHS[p.mIdx]); totalRevenue += p.revenue; });
+          return [{ kind: "needprop", report: "channel mix", months: [...monthsSet], totalRevenue, channels }];
+        }
+      }
+    }
+  }
 
   // detect format
   const hasSource = find("source") >= 0;
   const hasCheckin = find("check in", "check-in", "checkin") >= 0;
   const hasListing = find("listing") >= 0;
+  const hasStayDate = find("stay date") >= 0;
+  const hasResSource = find("reservation source") >= 0;
+  const hasBookedNights = colWhere((h) => h.includes("booked nights")) >= 0;
+  const hasPickup = colWhere((h) => h.includes("pickup")) >= 0 || colWhere((h) => h.includes("booking window")) >= 0;
   const dateCol = find("date");
-  // monthly RevPAR style: a "date" col with month names + year-suffixed revenue cols
   const yearRevCols = headers.map((hd, i) => {
-    const m = String(hd).match(/revenue\D*(\d{4})/i) || String(hd).match(/rental revenue\D*(\d{4})/i);
+    const m = String(hd).match(/revenue\D*(\d{4})/i);
     return m ? { i, year: +m[1] } : null;
   }).filter(Boolean);
   const yearRevparCols = headers.map((hd, i) => { const m = String(hd).match(/revpar\D*(\d{4})/i); return m ? { i, year: +m[1] } : null; }).filter(Boolean);
   const yearNightsCols = headers.map((hd, i) => { const m = String(hd).match(/(accommodations booked|nights)\D*(\d{4})/i); return m ? { i, year: +m[2] } : null; }).filter(Boolean);
 
+  // 1) RESERVATION-LEVEL (one row per booking)
   if (hasSource && hasCheckin) {
-    // RESERVATION-LEVEL
-    const cSrc = find("source"), cIn = find("check in", "check-in", "checkin"), cList = find("listing");
-    const cNights = find("nights"), cAF = find("af", "accommodation fare", "fare", "revenue"), cADR = find("adr");
+    const cSrc = find("source"), cIn = find("check in", "check-in", "checkin"), cList = find("listing", "property");
+    const cNights = find("nights"), cAF = find("af", "accommodation fare", "fare", "rent", "revenue"), cADR = find("adr");
     for (const r of body) {
-      const list = r[cList]; const prop = classifyListing(list) || ctx.propOverride;
-      if (!prop) continue;
+      const prop = classifyListing(r[cList]) || ctx.propOverride; if (!prop) continue;
       const d = toDate(r[cIn]); if (!d) continue;
-      let rev = num(r[cAF]);
-      const nights = num(r[cNights]) || 0;
+      let rev = num(r[cAF]); const nights = num(r[cNights]) || 0;
       if (rev == null && cADR >= 0) rev = (num(r[cADR]) || 0) * nights;
       if (rev == null) continue;
-      out.push({ kind: "res", prop, month: mkey(d.getFullYear(), d.getMonth()), year: d.getFullYear(), mIdx: d.getMonth(), revenue: rev, nights, source: sourceLabel(r[cSrc]) });
+      // Split the stay across the months its nights actually fall in, so a stay starting Jun 28
+      // puts 3 nights in June and 4 in July instead of all 7 in June. Revenue follows the nights.
+      const spans = [];
+      if (nights > 1) {
+        const counts = {};
+        for (let i = 0; i < nights; i++) {
+          const nd = new Date(d.getFullYear(), d.getMonth(), d.getDate() + i);
+          const k = `${nd.getFullYear()}-${nd.getMonth()}`;
+          counts[k] = (counts[k] || 0) + 1;
+        }
+        for (const [k, n] of Object.entries(counts)) {
+          const [yy, mm] = k.split("-").map(Number);
+          spans.push({ yy, mm, n });
+        }
+      } else {
+        spans.push({ yy: d.getFullYear(), mm: d.getMonth(), n: nights || 0 });
+      }
+      const src = sourceLabel(r[cSrc]);
+      // Hostfully puts the BOOKING date inside the Source cell, e.g. "Airbnb 12/22/25". That gives us
+      // booking lead time (how far ahead guests book) and, with it, pace/pickup — no extra report needed.
+      const booked = bookingDateFrom(r[cSrc]);
+      const lead = booked ? Math.round((d - booked) / 86400000) : null;
+      spans.forEach(({ yy, mm, n }, si) => {
+        const share = nights > 0 ? n / nights : 1;
+        const rec = { kind: "res", prop, month: mkey(yy, mm), year: yy, mIdx: mm, revenue: rev * share, nights: n, source: src };
+        // Attach stay-level stats to the FIRST span only, so length-of-stay and lead time aren't
+        // counted twice when a booking straddles two months.
+        if (si === 0) { rec.los = nights || 0; if (lead != null && lead >= 0 && lead < 800) rec.lead = lead; }
+        out.push(rec);
+      });
     }
     return out;
   }
 
-  if (yearRevCols.length && dateCol >= 0) {
-    // MONTHLY TIME-SERIES (RevPAR report)
-    const prop = ctx.propOverride || guessPropertyFromFilename(ctx.filename) || classifyListing(ctx.filename);
+  // 2) CHANNEL PRODUCTION (Stay Date + Reservation Source + Total Room Revenue) -> channel mix + monthly revenue
+  if (hasResSource && hasStayDate) {
+    const cStay = find("stay date");
+    const cCat = colWhere((h) => h.includes("source category"));
+    const cDetail = colWhere((h) => h.includes("reservation source") && !h.includes("category"));
+    const cRooms = find("rooms sold"), cRev = find("total room revenue", "room revenue", "revenue");
+    const prop = guessProp(); const yr = new Date().getFullYear();
     for (const r of body) {
-      const mlabel = norm(r[dateCol]); const mIdx = MONTH_IDX[mlabel.slice(0, 3)];
-      if (mIdx == null) continue;
+      const mIdx = MONTH_IDX[norm(r[cStay]).slice(0, 3)]; if (mIdx == null) continue;
+      const rev = num(r[cRev]); if (rev == null || rev <= 0) continue;
+      const cat = cCat >= 0 ? norm(r[cCat]) : "";
+      const src = cat.includes("direct") ? "Direct" : sourceLabel(cDetail >= 0 ? r[cDetail] : r[cCat]);
+      out.push({ kind: "res", prop: prop || "unknown", month: mkey(yr, mIdx), year: yr, mIdx, revenue: rev, nights: num(r[cRooms]) || 0, source: src });
+    }
+    return out;
+  }
+
+  // 3) PACE / PICKUP report (Listing + Booked Nights + Pickup / Booking Window)
+  if (hasListing && (hasBookedNights || hasPickup)) {
+    const cList = find("listing");
+    const cBN = colWhere((h) => h === "booked nights");
+    const cBNs = colWhere((h) => h === "booked nights stly");
+    const cBNl = colWhere((h) => h === "booked nights ly");
+    const cP7 = colWhere((h) => h.includes("pickup") && h.includes("7 day") && !h.includes("stly"));
+    const cP30 = colWhere((h) => h.includes("pickup") && h.includes("30 day") && !h.includes("stly"));
+    const cBk = colWhere((h) => h === "number of bookings");
+    const cBW = colWhere((h) => h.includes("median booking window"));
+    for (const r of body) {
+      const prop = classifyListing(r[cList]) || ctx.propOverride; if (!prop) continue;
+      out.push({
+        kind: "pace", prop,
+        bookedNights: cBN >= 0 ? num(r[cBN]) || 0 : 0,
+        bookedNightsSTLY: cBNs >= 0 ? num(r[cBNs]) || 0 : 0,
+        bookedNightsLY: cBNl >= 0 ? num(r[cBNl]) || 0 : 0,
+        pickup7: cP7 >= 0 ? num(r[cP7]) || 0 : 0,
+        pickup30: cP30 >= 0 ? num(r[cP30]) || 0 : 0,
+        bookings: cBk >= 0 ? num(r[cBk]) || 0 : 0,
+        bookingWindow: cBW >= 0 ? num(r[cBW]) : null,
+      });
+    }
+    return out;
+  }
+
+  // 4) MONTHLY TIME-SERIES (RevPAR report: Date + Revenue YYYY columns)
+  if (yearRevCols.length && dateCol >= 0) {
+    const prop = guessProp();
+    for (const r of body) {
+      const mIdx = MONTH_IDX[norm(r[dateCol]).slice(0, 3)]; if (mIdx == null) continue;
       for (const yc of yearRevCols) {
         const rev = num(r[yc.i]); if (rev == null) continue;
         const revparC = yearRevparCols.find((x) => x.year === yc.year);
@@ -175,24 +509,44 @@ function ingestSheet(rows, ctx) {
     return out;
   }
 
+  // 5) LISTING-LEVEL KPIs — supports MULTIPLE stacked month sections (Jan, Feb, ... each its own block)
   if (hasListing) {
-    // LISTING-LEVEL KPI SNAPSHOT (annual or single-period)
     const cList = find("listing");
     const cOcc = find("occupancy", "occ %", "occ");
     const cRev = find("rental revenue", "revenue");
     const cADR = find("adr"); const cRevpar = find("revpar");
-    const cRevLY = headers.findIndex((hd) => /revenue.*(ly|2025|2024)/i.test(hd) || /\(2025\)/.test(hd));
-    const thisYear = ctx.asYear || new Date().getFullYear();
-    for (const r of body) {
-      const list = r[cList]; if (!list || norm(list) === "total") continue;
+    const cRevLY = colWhere((h) => h.includes("revenue") && h.includes("ly"));
+    const cMonth = colWhere((h) => h === "month" || h === "period" || h === "month/year");
+    const bareMonth = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?$/;
+    let curYear = ctx.asYear || new Date().getFullYear();
+    let curMonth = null;
+    for (const row of rows) {
+      // update current month/year if this row carries a month label (with or without a year)
+      for (const cell of row) {
+        if (cell instanceof Date && cell.getDate() === 1 && cell.getFullYear() > 2015) { curMonth = cell.getMonth(); curYear = cell.getFullYear(); break; }
+        const s = String(cell); const my = s.match(MONTH_YEAR_RE);
+        if (my) { curMonth = MONTH_IDX[my[1].toLowerCase().slice(0, 3)]; curYear = +my[2]; break; }
+        const mo = norm(s).match(bareMonth);
+        if (mo) { curMonth = MONTH_IDX[mo[1].slice(0, 3)]; break; }
+      }
+      if (row.some((c) => norm(c).includes("listing name"))) continue; // header row
+      // an explicit Month/Period column (one value per row) is the most reliable source
+      if (cMonth >= 0) {
+        const mc = row[cMonth];
+        const dt = mc instanceof Date ? mc : toDate(mc);
+        if (dt && !isNaN(dt.getTime())) { curMonth = dt.getMonth(); curYear = dt.getFullYear(); }
+      }
+      const list = row[cList]; if (!list || norm(list) === "total" || norm(list) === "listing name") continue;
       const prop = classifyListing(list) || ctx.propOverride; if (!prop) continue;
-      const rev = cRev >= 0 ? num(r[cRev]) : null; if (rev == null) continue;
-      out.push({
-        kind: "snapshot", prop, year: thisYear, month: ctx.snapMonth || `${thisYear}-00`,
-        revenue: rev, occ: cOcc >= 0 ? pct(r[cOcc]) : null,
-        adr: cADR >= 0 ? num(r[cADR]) : null, revpar: cRevpar >= 0 ? num(r[cRevpar]) : null,
-        revenueLY: cRevLY >= 0 ? num(r[cRevLY]) : null,
-      });
+      const rev = cRev >= 0 ? num(row[cRev]) : null; if (rev == null) continue;
+      const occ = cOcc >= 0 ? pct(row[cOcc]) : null;
+      const revLY = cRevLY >= 0 ? num(row[cRevLY]) : null;
+      if (curMonth != null) {
+        const nights = occ != null ? occ * daysInMonth(curYear, curMonth) : null;
+        out.push({ kind: "listingmonth", prop, year: curYear, mIdx: curMonth, month: mkey(curYear, curMonth), monthLY: mkey(curYear - 1, curMonth), revenue: rev, nights, revenueLY: revLY });
+      } else {
+        out.push({ kind: "snapshot", prop, year: curYear, month: ctx.snapMonth || `${curYear}-00`, revenue: rev, occ, adr: cADR >= 0 ? num(row[cADR]) : null, revpar: cRevpar >= 0 ? num(row[cRevpar]) : null, revenueLY: revLY });
+      }
     }
     return out;
   }
@@ -202,9 +556,72 @@ function ingestSheet(rows, ctx) {
 /* merge normalized records into the data model */
 function applyRecords(model, records) {
   const next = JSON.parse(JSON.stringify(model));
+
+  // PASS 1: figure out which buckets this batch will write, so a re-upload REPLACES rather than double-counts
+  const touch = {};
+  const adTouch = {};
   for (const rec of records) {
     if (!rec.prop || rec.prop === "unknown") continue;
-    const p = (next.properties[rec.prop] = next.properties[rec.prop] || { monthly: {}, ota: {}, snapshot: null });
+    if (rec.kind === "ad") { (adTouch[rec.prop] = adTouch[rec.prop] || new Set()).add(rec.channel + "||" + rec.month); continue; }
+    const t = (touch[rec.prop] = touch[rec.prop] || { months: new Set(), channelMonths: new Set(), wcDates: new Set(), snapshot: false, pace: false });
+    if (rec.kind === "listingmonth") { t.months.add(rec.month); if (rec.monthLY) t.months.add(rec.monthLY); }
+    else if (rec.kind === "res") t.channelMonths.add(rec.month);
+    else if (rec.kind === "monthly") t.months.add(rec.month);
+    else if (rec.kind === "wc") t.wcDates.add(rec.date);
+    else if (rec.kind === "pace") t.pace = true;
+    else if (rec.kind === "snapshot" && (!rec.month || rec.month.endsWith("-00"))) t.snapshot = true;
+  }
+  for (const pid of Object.keys(touch)) {
+    const p = (next.properties[pid] = next.properties[pid] || { monthly: {}, channelMonthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
+    p.otaByMonth = p.otaByMonth || {}; p.channelMonthly = p.channelMonthly || {};
+    for (const m of touch[pid].months) { delete p.monthly[m]; }
+    for (const m of touch[pid].channelMonths) { delete p.channelMonthly[m]; delete p.otaByMonth[m]; if (p.resStats) delete p.resStats[m]; }
+    if (touch[pid].wcDates.size) { p.wc = p.wc || {}; for (const dte of touch[pid].wcDates) delete p.wc[dte]; }
+    if (touch[pid].pace) p.pace = null;
+    if (touch[pid].snapshot) p.snapshot = null;
+  }
+  for (const pid of Object.keys(adTouch)) {
+    next.ads = next.ads || {}; const pa = (next.ads[pid] = next.ads[pid] || {});
+    for (const ck of adTouch[pid]) { const [ch, mo] = ck.split("||"); if (pa[ch]) delete pa[ch][mo]; }
+  }
+
+  // PASS 2: apply (accumulate within this single batch)
+  for (const rec of records) {
+    if (!rec.prop || rec.prop === "unknown") continue;
+    if (rec.kind === "ad") {
+      next.ads = next.ads || {};
+      const pa = (next.ads[rec.prop] = next.ads[rec.prop] || {});
+      const ch = (pa[rec.channel] = pa[rec.channel] || {});
+      const m = (ch[rec.month] = ch[rec.month] || { spend: 0, revenue: 0, bookings: 0, impressions: 0, clicks: 0 });
+      m.spend += rec.spend || 0; m.revenue += rec.revenue || 0; m.bookings += rec.bookings || 0; m.impressions += rec.impressions || 0; m.clicks += rec.clicks || 0;
+      continue;
+    }
+    const p = (next.properties[rec.prop] = next.properties[rec.prop] || { monthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
+
+    if (rec.kind === "wc") {
+      const w = (p.wc = p.wc || {});
+      const day = (w[rec.date] = w[rec.date] || { revenue: 0, booked: 0, units: 0 });
+      day.revenue += rec.revenue || 0; day.booked += rec.booked || 0; day.units += rec.units || 0;
+      continue;
+    }
+    if (rec.kind === "pace") {
+      const pc = (p.pace = p.pace || { bookedNights: 0, bookedNightsSTLY: 0, bookedNightsLY: 0, pickup7: 0, pickup30: 0, bookings: 0, bwSum: 0, bwN: 0 });
+      pc.bookedNights += rec.bookedNights || 0; pc.bookedNightsSTLY += rec.bookedNightsSTLY || 0; pc.bookedNightsLY += rec.bookedNightsLY || 0;
+      pc.pickup7 += rec.pickup7 || 0; pc.pickup30 += rec.pickup30 || 0; pc.bookings += rec.bookings || 0;
+      if (rec.bookingWindow != null) { pc.bwSum += rec.bookingWindow; pc.bwN++; }
+      continue;
+    }
+    if (rec.kind === "listingmonth") {
+      const cur = (p.monthly[rec.month] = p.monthly[rec.month] || { revenue: 0, nights: 0 });
+      cur.revenue += rec.revenue || 0;
+      if (rec.nights != null) cur.nights = (cur.nights || 0) + rec.nights;
+      if (rec.revenueLY != null) {
+        const ly = (p.monthly[rec.monthLY] = p.monthly[rec.monthLY] || { revenue: 0, nights: 0 });
+        ly.revenue += rec.revenueLY || 0;
+      }
+      continue;
+    }
+
     const isAnnualSnap = rec.kind === "snapshot" && (!rec.month || rec.month.endsWith("-00"));
     if (isAnnualSnap) {
       const s = (p.snapshot = p.snapshot || { year: rec.year, revenue: 0, revenueLY: 0, occSum: 0, occN: 0, adrSum: 0, adrN: 0, revparSum: 0, revparN: 0 });
@@ -214,11 +631,29 @@ function applyRecords(model, records) {
       if (rec.adr != null) { s.adrSum += rec.adr; s.adrN++; }
       if (rec.revpar != null) { s.revparSum += rec.revpar; s.revparN++; }
     } else {
-      const cur = (p.monthly[rec.month] = p.monthly[rec.month] || { revenue: 0, nights: 0 });
       if (rec.kind === "res") {
+        // Channel-production / reservation data drives channel MIX only — kept out of headline revenue.
+        p.channelMonthly = p.channelMonthly || {};
+        const cur = (p.channelMonthly[rec.month] = p.channelMonthly[rec.month] || { revenue: 0, nights: 0 });
         cur.revenue += rec.revenue; cur.nights += rec.nights || 0;
-        p.ota[rec.source] = (p.ota[rec.source] || 0) + rec.revenue;
+        const obm = (p.otaByMonth = p.otaByMonth || {});
+        const mo = (obm[rec.month] = obm[rec.month] || {});
+        mo[rec.source] = (mo[rec.source] || 0) + rec.revenue;
+        // Stay-level stats for booking window / length of stay / pickup curve
+        if (rec.los != null || rec.lead != null) {
+          const rs = (p.resStats = p.resStats || {});
+          const st = (rs[rec.month] = rs[rec.month] || { n: 0, losSum: 0, losHist: {}, leadSum: 0, leadN: 0, leadHist: {}, leadNights: {} });
+          st.n++;
+          if (rec.los != null) { st.losSum += rec.los; const b = rec.los <= 1 ? "1" : rec.los <= 2 ? "2" : rec.los <= 3 ? "3" : rec.los <= 6 ? "4-6" : rec.los <= 13 ? "7-13" : "14+"; st.losHist[b] = (st.losHist[b] || 0) + 1; }
+          if (rec.lead != null) {
+            st.leadSum += rec.lead; st.leadN++;
+            const b = rec.lead <= 0 ? "same day" : rec.lead <= 3 ? "1-3d" : rec.lead <= 7 ? "4-7d" : rec.lead <= 14 ? "8-14d" : rec.lead <= 30 ? "15-30d" : rec.lead <= 60 ? "31-60d" : rec.lead <= 90 ? "61-90d" : "90d+";
+            st.leadHist[b] = (st.leadHist[b] || 0) + 1;
+            st.leadNights[b] = (st.leadNights[b] || 0) + (rec.los || 0);
+          }
+        }
       } else {
+        const cur = (p.monthly[rec.month] = p.monthly[rec.month] || { revenue: 0, nights: 0 });
         cur.revenue = rec.revenue;
         if (rec.nights != null) cur.nights = rec.nights;
         if (rec.revpar != null) cur.revpar = rec.revpar;
@@ -228,29 +663,78 @@ function applyRecords(model, records) {
       }
     }
   }
+
+  // PASS 3: rebuild each property's flat channel total from the monthly channel buckets (always idempotent)
+  for (const pid of Object.keys(next.properties)) {
+    const p = next.properties[pid];
+    if (p.otaByMonth) {
+      p.ota = {};
+      for (const m of Object.keys(p.otaByMonth)) for (const [src, v] of Object.entries(p.otaByMonth[m])) p.ota[src] = (p.ota[src] || 0) + v;
+    }
+  }
   next.lastUpdated = new Date().toISOString();
   return next;
 }
 
+/* build an activity log by diffing two models after an upload */
+function buildActivity(before, after, fname) {
+  const entries = []; const ts = new Date().toISOString();
+  for (const pid of Object.keys(after.properties)) {
+    const bd = before.properties[pid] ? deriveProperty(pid, before) : null;
+    const ad = deriveProperty(pid, after);
+    if (!ad) continue;
+    const bRev = bd?.currentMonth?.revenue || 0; const aRev = ad.currentMonth?.revenue || 0;
+    if (Math.abs(aRev - bRev) > 1) {
+      entries.push({ ts, pid, text: `${ad.meta.name}: ${ad.currentMonth.label} revenue ${bRev ? "updated to" : "set to"} ${fmtMoney(aRev)}${bRev ? ` (was ${fmtMoney(bRev)})` : ""}` });
+    }
+  }
+  if (!entries.length) entries.push({ ts, pid: null, text: `Loaded ${fname}` });
+  return entries;
+}
+
 /* derive KPIs for a property */
-function deriveProperty(pid, model) {
+function deriveProperty(pid, model, metaOverride) {
   const p = model.properties[pid];
-  const meta = PROP_BY_ID[pid];
+  const meta = metaOverride || PROP_BY_ID[pid];
   if (!p) return null;
-  const keys = Object.keys(p.monthly).filter((k) => !k.endsWith("-00")).sort();
+  // Headline revenue/nights come from RevPAR or whole-portfolio (p.monthly). Channel-production/STR
+  // reservation data (p.channelMonthly) is ONLY a fallback for months with no headline source — it
+  // must never stack on top of or overwrite the authoritative RevPAR figure.
+  const headline = p.monthly || {};
+  const chan = p.channelMonthly || {};
+  const monthly = {};
+  const revDisc = {}; // months where RevPAR headline and channel-report revenue disagree materially
+  for (const k of new Set([...Object.keys(headline), ...Object.keys(chan)])) {
+    if (k in headline) {
+      monthly[k] = headline[k];      // RevPAR/whole-portfolio is authoritative — even a real $0
+      // If a channel report ALSO covers this month, note any material disagreement (>2% and >$100)
+      if (chan[k] && chan[k].revenue != null) {
+        const hv = headline[k].revenue || 0, cv = chan[k].revenue || 0;
+        if (Math.abs(hv - cv) > 100 && (hv === 0 || Math.abs(hv - cv) / Math.abs(hv) > 0.02)) revDisc[k] = { headline: hv, channel: cv };
+      }
+    }
+    else monthly[k] = { revenue: chan[k].revenue || 0, nights: chan[k].nights || 0 }; // channel only fills months with no headline source
+  }
+  const keys = Object.keys(monthly).filter((k) => !k.endsWith("-00")).sort();
   const series = keys.map((k) => {
     const [y, m] = k.split("-").map(Number);
-    const d = p.monthly[k];
+    const d = monthly[k];
     const days = daysInMonth(y, m - 1);
-    const avail = meta.units * days;
-    const occ = d.occ != null ? d.occ : d.nights ? Math.min(1, d.nights / avail) : null;
+    const avail = (p.availByMonth && p.availByMonth[k] != null) ? p.availByMonth[k] : availUnitNights(pid, y, m - 1, model);
+    const rawOcc = d.occ != null ? d.occ : d.nights && avail ? d.nights / avail : null;
+    const occ = rawOcc; // NOT clamped — an impossible value must be visible, not hidden
+    const overbooked = rawOcc != null && rawOcc > 1.0001;
     const adr = d.adr != null ? d.adr : d.nights ? d.revenue / d.nights : null;
     const revpar = d.revpar != null ? d.revpar : avail ? d.revenue / avail : null;
-    return { key: k, year: y, mIdx: m - 1, label: `${MONTHS[m - 1]} '${String(y).slice(2)}`, monthName: MONTHS[m - 1], revenue: d.revenue, occ, adr, revpar, nights: d.nights };
+    return { key: k, year: y, mIdx: m - 1, label: `${MONTHS[m - 1]} '${String(y).slice(2)}`, monthName: MONTHS[m - 1], revenue: d.revenue, occ, adr, revpar, nights: d.nights, avail, unitsActive: unitsActive(pid, y, m - 1, model), overbooked };
   });
   const snap = p.snapshot && p.snapshot.revenue ? p.snapshot : null;
-  let latest = series[series.length - 1] || null;
-  let prev = series[series.length - 2] || null;
+  // Use the most recent month that actually has revenue (skip empty future months like unbooked Oct/Nov/Dec)
+  const withData = series.filter((s) => (s.revenue || 0) > 0 || (s.nights || 0) > 0);
+  let latest = withData[withData.length - 1] || null;
+  let prev = withData[withData.length - 2] || null;
+  // If we have a snapshot but no monthly series, use the snapshot as latest
+  // If we have monthly series, prefer it — but also try to fill in occ/adr/revpar from snapshot if missing
   if (!latest && snap) {
     latest = {
       label: `YTD ${snap.year}`, monthName: null, year: snap.year, isSnapshot: true,
@@ -272,7 +756,198 @@ function deriveProperty(pid, model) {
     [priorY]: priorY != null ? (byYear[priorY]?.[i]?.revenue ?? null) : null,
   })) : [];
   const ota = Object.entries(p.ota || {}).map(([name, value]) => ({ name, value }));
-  return { pid, meta, series, latest, prev, snap, yoy, years, curY, priorY, ota, raw: p };
+
+  // Live calendar awareness — recomputed every render, so it rolls over automatically each month.
+  const now = new Date();
+  const curMonthKey = mkey(now.getFullYear(), now.getMonth());
+  const prevD = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevMonthKey = mkey(prevD.getFullYear(), prevD.getMonth());
+  const cmRow = series.find((s) => s.key === curMonthKey);
+  const pmRow = series.find((s) => s.key === prevMonthKey);
+  const lyRow = series.find((s) => s.year === now.getFullYear() - 1 && s.mIdx === now.getMonth());
+  const thisYear = now.getFullYear();
+  const ytd = series.filter((s) => s.year === thisYear && s.mIdx <= now.getMonth()).reduce((a, s) => a + (s.revenue || 0), 0);
+  const ytdPrior = series.filter((s) => s.year === thisYear - 1 && s.mIdx <= now.getMonth()).reduce((a, s) => a + (s.revenue || 0), 0);
+  const currentMonth = {
+    key: curMonthKey,
+    label: `${MONTHS[now.getMonth()]} ${thisYear}`,
+    revenue: cmRow ? (cmRow.revenue || 0) : 0,
+    prevRevenue: pmRow ? (pmRow.revenue || 0) : null,
+    lyRevenue: lyRow ? (lyRow.revenue || 0) : null,
+    lyLabel: `${MONTHS[now.getMonth()]} ${now.getFullYear() - 1}`,
+    nights: cmRow ? (cmRow.nights ?? null) : null,
+    occ: cmRow ? (cmRow.occ ?? null) : null,
+    adr: cmRow ? (cmRow.adr ?? null) : null,
+    revpar: cmRow ? (cmRow.revpar ?? null) : null,
+    prevOcc: pmRow ? (pmRow.occ ?? null) : null,
+    prevAdr: pmRow ? (pmRow.adr ?? null) : null,
+    prevRevpar: pmRow ? (pmRow.revpar ?? null) : null,
+    has: !!cmRow,
+  };
+  // run-rate forecast for the current month
+  const dim = daysInMonth(now.getFullYear(), now.getMonth());
+  const dayOfMonth = now.getDate();
+  const fracElapsed = dayOfMonth / dim;
+  const onBooks = currentMonth.revenue;
+  // early in the month, advance bookings dominate, so on-the-books is the best estimate;
+  // later, blend in a run-rate projection
+  const runRate = fracElapsed > 0 ? onBooks / fracElapsed : onBooks;
+  const projection = fracElapsed < 0.5 ? Math.max(onBooks, runRate * 0.5 + onBooks * 0.5) : runRate;
+  const forecast = { onBooks, projection, fracElapsed, dim, dayOfMonth };
+
+  const otaByMonth = p.otaByMonth || {};
+  const goal = (model.goals && model.goals[pid] != null) ? model.goals[pid] : (meta.goal || null);
+
+  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, resStats: p.resStats || {}, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+}
+// Combine several properties into one derived object (Khorrami "All", or the whole portfolio).
+// Pools correctly: sums revenue + nights per month, then recomputes occ/ADR/RevPAR against the
+// combined unit count — never averages percentages.
+function deriveCombined(memberIds, model, meta) {
+  // Resolve each member with its OWN best source first (RevPAR or channel fallback), THEN pool.
+  // (Merging raw buckets would let a RevPAR member's month keys hide a channel-only member.)
+  const monthly = {}, otaByMonth = {}, ota = {}, availByMonth = {};
+  memberIds.forEach((mid) => {
+    const dm = deriveProperty(mid, model); if (!dm) return;
+    dm.series.forEach((s) => {
+      const cur = (monthly[s.key] = monthly[s.key] || { revenue: 0, nights: 0 });
+      cur.revenue += s.revenue || 0; cur.nights += s.nights || 0;
+      availByMonth[s.key] = (availByMonth[s.key] || 0) + (s.avail || 0);
+    });
+    for (const [mk, srcs] of Object.entries(dm.otaByMonth || {})) { const dst = (otaByMonth[mk] = otaByMonth[mk] || {}); for (const [s, v] of Object.entries(srcs)) dst[s] = (dst[s] || 0) + v; }
+    (dm.ota || []).forEach((o) => { ota[o.name] = (ota[o.name] || 0) + o.value; });
+  });
+  const merged = { monthly, channelMonthly: {}, ota, otaByMonth, snapshot: null, availByMonth };
+  const tempModel = { ...model, properties: { ...model.properties, __combined: merged } };
+  return deriveProperty("__combined", tempModel, meta);
+}
+
+// ---- Period + comparison engine (drives the linked squares + bar graph) ----
+const PERIOD_DEFS = [
+  { id: "mtd", label: "This month" },
+  { id: "qtd", label: "This quarter" },
+  { id: "ytd", label: "YTD" },
+  { id: "t12", label: "Last 12 mo" },
+];
+function periodMonthList(periodId, now = new Date()) {
+  const y = now.getFullYear(), m = now.getMonth();
+  const out = [];
+  if (periodId === "mtd") out.push({ year: y, mIdx: m });
+  else if (periodId === "qtd") { const qStart = Math.floor(m / 3) * 3; for (let i = qStart; i <= m; i++) out.push({ year: y, mIdx: i }); }
+  else if (periodId === "ytd") { for (let i = 0; i <= m; i++) out.push({ year: y, mIdx: i }); }
+  else if (periodId === "t12") { for (let i = 11; i >= 0; i--) { const d = new Date(y, m - i, 1); out.push({ year: d.getFullYear(), mIdx: d.getMonth() }); } }
+  return out;
+}
+function shiftMonthsYear(list) { return list.map((x) => ({ year: x.year - 1, mIdx: x.mIdx })); }
+function shiftMonthsPrevPeriod(list) {
+  const n = list.length;
+  return list.map((x) => { const d = new Date(x.year, x.mIdx - n, 1); return { year: d.getFullYear(), mIdx: d.getMonth() }; });
+}
+function poolMonths(d, monthList, metric) {
+  let rev = 0, nights = 0, avail = 0, hasAny = false;
+  monthList.forEach(({ year, mIdx }) => {
+    const s = d.byYear?.[year]?.[mIdx];
+    // Prefer the availability already resolved on the series row (roster-aware, and for combined
+    // views it is the summed availability of the members). Fall back to the roster directly.
+    avail += (s && s.avail != null) ? s.avail : availUnitNights(d.pid, year, mIdx, d.__model);
+    if (s) { hasAny = true; rev += s.revenue || 0; nights += s.nights || 0; }
+  });
+  if (!hasAny) return null;
+  if (metric === "revenue") return rev;
+  if (metric === "occ") return avail ? nights / avail : null; // NOT clamped
+  if (metric === "adr") return nights ? rev / nights : null;
+  if (metric === "revpar") return avail ? rev / avail : null;
+  return null;
+}
+function periodStats(d, periodId, metric, now = new Date()) {
+  const list = periodMonthList(periodId, now);
+  const value = poolMonths(d, list, metric);
+  const yoyList = shiftMonthsYear(list);
+  const momList = shiftMonthsPrevPeriod(list);
+  const ytdYoyList = MONTHS.map((_, i) => ({ year: now.getFullYear() - 1, mIdx: i })); // YTD YoY = vs full prior-year total (pace)
+  const yoyValue = poolMonths(d, periodId === "ytd" ? ytdYoyList : yoyList, metric);
+  const momValue = poolMonths(d, momList, metric);
+  const bars = list.map(({ year, mIdx }) => {
+    const s = d.byYear?.[year]?.[mIdx];
+    const ly = d.byYear?.[year - 1]?.[mIdx];
+    const pmD = new Date(year, mIdx - 1, 1);
+    const pm = d.byYear?.[pmD.getFullYear()]?.[pmD.getMonth()];
+    const val = (row) => row ? (metric === "revenue" ? (row.revenue || 0) : row[metric] ?? null) : null;
+    return { key: `${year}-${String(mIdx + 1).padStart(2, "0")}`, label: `${MONTHS[mIdx]} '${String(year).slice(2)}`, cur: val(s), prevYear: val(ly), prevMonth: val(pm) };
+  });
+  return { value, yoyValue, momValue, bars, list, periodId, label: PERIOD_DEFS.find((p) => p.id === periodId)?.label || "" };
+}
+
+// Aggregate ad spend/revenue/ROAS per channel for a property
+function deriveAds(model, pid) {
+  const a = model.ads && model.ads[pid];
+  if (!a || !Object.keys(a).length) return null;
+  const channels = Object.keys(a).map((ch) => {
+    const months = Object.keys(a[ch]).sort().map((mk) => {
+      const [y, m] = mk.split("-").map(Number); const d = a[ch][mk];
+      return { key: mk, label: `${MONTHS[m - 1]} ${y}`, ...d, roas: d.spend > 0 ? d.revenue / d.spend : null };
+    });
+    const tot = months.reduce((t, r) => ({ spend: t.spend + (r.spend || 0), revenue: t.revenue + (r.revenue || 0), bookings: t.bookings + (r.bookings || 0) }), { spend: 0, revenue: 0, bookings: 0 });
+    return { channel: ch, months, total: { ...tot, roas: tot.spend > 0 ? tot.revenue / tot.spend : null } };
+  });
+  const spend = channels.reduce((s, c) => s + c.total.spend, 0);
+  const revenue = channels.reduce((s, c) => s + c.total.revenue, 0);
+  return { channels, blended: { spend, revenue, roas: spend > 0 ? revenue / spend : null } };
+}
+
+// Composite property health score (0-100)
+function healthScore(d) {
+  if (!d || !d.latest) return null;
+  const L = d.latest;
+  const occScore = L.occ != null ? Math.min(1, L.occ / 0.75) : 0.5;           // target 75% occ
+  const goalScore = d.goal ? Math.min(1, (d.currentMonth.revenue || 0) / d.goal) : 0.5;
+  let yoyScore = 0.5;
+  if (d.priorY != null) { const py = d.yoy.find((y) => y.month === L.monthName)?.[d.priorY]; const dd = delta(L.revenue, py); if (dd != null) yoyScore = Math.max(0, Math.min(1, 0.5 + dd)); }
+  const paceScore = d.pace && d.pace.bookedNightsSTLY ? Math.max(0, Math.min(1, d.pace.bookedNights / d.pace.bookedNightsSTLY)) : 0.5;
+  const score = Math.round((occScore * 0.3 + goalScore * 0.3 + yoyScore * 0.25 + paceScore * 0.15) * 100);
+  return { score, parts: { occScore, goalScore, yoyScore, paceScore } };
+}
+
+// Build the normalized 5-card KPI object for a single property
+function buildKpi(d) {
+  const mode = d.meta.compareMode || (d.priorY != null ? "yoy" : "mom");
+  const cm = d.currentMonth;
+  const useYoy = mode === "yoy" && cm.lyRevenue != null && cm.lyRevenue > 0;
+  return {
+    currentMonthRevenue: cm.revenue,
+    currentMonthLabel: cm.label,
+    compareMode: mode,
+    currentMonthDelta: useYoy ? delta(cm.revenue, cm.lyRevenue) : (cm.prevRevenue != null && cm.prevRevenue > 0 ? delta(cm.revenue, cm.prevRevenue) : null),
+    currentMonthDeltaLabel: useYoy ? "YoY" : "MoM",
+    currentMonthCompareVal: useYoy ? cm.lyRevenue : cm.prevRevenue,
+    currentMonthCompareLabel: useYoy ? cm.lyLabel : "prev mo",
+    ytdRevenue: d.ytd,
+    ytdLabel: `${d.ytdYear} YTD`,
+    ytdDelta: d.ytdPrior > 0 ? delta(d.ytd, d.ytdPrior) : null,
+    occ: d.currentMonth.occ ?? null, adr: d.currentMonth.adr ?? null, revpar: d.currentMonth.revpar ?? null,
+    metricLabel: d.currentMonth.label,
+    occDelta: delta(d.currentMonth.occ, d.currentMonth.prevOcc),
+    adrDelta: delta(d.currentMonth.adr, d.currentMonth.prevAdr),
+    revparDelta: delta(d.currentMonth.revpar, d.currentMonth.prevRevpar),
+  };
+}
+
+// Aggregate World Cup daily data across a scope of properties
+function deriveWorldCup(model, propIds) {
+  const ids = propIds && propIds.length ? propIds : PROPERTIES.map((p) => p.id);
+  const dates = wcDateList();
+  let tRev = 0, tBooked = 0, tUnitNights = 0;
+  const byDate = dates.map((date) => {
+    let rev = 0, booked = 0, units = 0;
+    ids.forEach((pid) => { const day = model.properties[pid]?.wc?.[date]; if (day) { rev += day.revenue; booked += day.booked; units += day.units; } });
+    tRev += rev; tBooked += booked; tUnitNights += units;
+    return { date, revenue: rev, booked, units, occ: units ? booked / units : null, adr: booked ? rev / booked : null, revpar: units ? rev / units : null, match: WC_MATCH_BY_DATE[date] || null };
+  });
+  const has = byDate.some((d) => d.units > 0);
+  const totals = { revenue: tRev, occ: tUnitNights ? tBooked / tUnitNights : null, adr: tBooked ? tRev / tBooked : null, revpar: tUnitNights ? tRev / tUnitNights : null };
+  let mdBooked = 0, mdUnits = 0, nmBooked = 0, nmUnits = 0;
+  byDate.forEach((d) => { if (d.match) { mdBooked += d.booked; mdUnits += d.units; } else { nmBooked += d.booked; nmUnits += d.units; } });
+  return { byDate, totals, has, matchOcc: mdUnits ? mdBooked / mdUnits : null, nonMatchOcc: nmUnits ? nmBooked / nmUnits : null };
 }
 
 function fmtMoney(v, d = 0) { if (v == null) return "—"; return "$" + Number(v).toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d }); }
@@ -281,24 +956,48 @@ function delta(cur, prev) { if (cur == null || prev == null || prev === 0) retur
 
 /* ---------------- Claude API ---------------- */
 async function callClaude({ messages, system, tools, max_tokens = 1000 }) {
-  const body = { model: "claude-sonnet-4-20250514", max_tokens, messages };
-  if (system) body.system = system;
-  if (tools) body.tools = tools;
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error("API " + res.status);
-  const data = await res.json();
-  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  let convo = messages.slice();
+  for (let turn = 0; turn < 4; turn++) {
+    const body = { model: "claude-sonnet-4-6", max_tokens, messages: convo };
+    if (system) body.system = system;
+    if (tools) body.tools = tools;
+    const res = await fetch("/api/claude", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-app-password": import.meta.env.VITE_APP_PASSWORD || "" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      let msg = "API " + res.status;
+      try { const e = await res.json(); msg = (e && e.error && (e.error.message || e.error)) || msg; } catch {}
+      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    }
+    const data = await res.json();
+    // web search can pause mid-turn; resend the partial assistant turn to let it finish
+    if (data.stop_reason === "pause_turn" && Array.isArray(data.content)) {
+      convo = convo.concat([{ role: "assistant", content: data.content }]);
+      continue;
+    }
+    return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  }
+  throw new Error("The model kept searching without finishing — try again.");
 }
-function snapshotForAI(model) {
+function extractJson(s) {
+  const clean = String(s || "").replace(/```json|```/g, "");
+  const start = clean.indexOf("{"); const end = clean.lastIndexOf("}");
+  return start >= 0 && end > start ? clean.slice(start, end + 1) : clean.trim();
+}
+function snapshotForAI(model, propIds) {
   const lines = [];
-  for (const pid of Object.keys(model.properties)) {
+  const ids = propIds && propIds.length ? propIds : Object.keys(model.properties);
+  for (const pid of ids) {
+    if (!model.properties[pid]) continue;
     const d = deriveProperty(pid, model); if (!d || !d.latest) continue;
     const L = d.latest;
     lines.push(`${d.meta.name} (${d.meta.location}, ${d.meta.units} units) — latest ${L.label}: Revenue ${fmtMoney(L.revenue)}, Occ ${fmtPct(L.occ)}, ADR ${fmtMoney(L.adr)}, RevPAR ${fmtMoney(L.revpar)}.` +
+      ` Current month (${d.currentMonth.label}) rev ${fmtMoney(d.currentMonth.revenue)}; ${d.ytdYear} YTD ${fmtMoney(d.ytd)}.` +
       (d.priorY != null ? ` Prior-year ${L.monthName} rev: ${fmtMoney(d.yoy.find((y) => y.month === L.monthName)?.[d.priorY])}.` : "") +
-      (d.ota.length ? ` OTA mix: ${d.ota.map((o) => o.name + " " + fmtMoney(o.value)).join(", ")}.` : ""));
+      (d.pace ? ` Pace: ${d.pace.bookedNights} booked nights vs ${d.pace.bookedNightsSTLY} same-time-last-year; pickup 7d ${d.pace.pickup7}, 30d ${d.pace.pickup30}.` : "") +
+      (d.ota.length ? ` Channel mix: ${d.ota.map((o) => o.name + " " + fmtMoney(o.value)).join(", ")}.` : ""));
   }
   return lines.join("\n") || "No data loaded yet.";
 }
@@ -327,30 +1026,52 @@ async function extractFromImageOrPdf(file) {
 /* ============================================================
    COMPONENT
    ============================================================ */
-export default function App() {
+function Dashboard() {
   const [model, setModel] = useState(MODEL);
   const [loaded, setLoaded] = useState(false);
   const [page, setPage] = useState("overview");
   const [ingestMsg, setIngestMsg] = useState(null);
+  const [hfDebug, setHfDebug] = useState(null);
   const [busy, setBusy] = useState(false);
   const [propOverride, setPropOverride] = useState("auto");
   const fileRef = useRef(null);
+  // Editor lock: uploading/editing is gated behind an editor password. Everyone else is view-only.
+  const EDITOR_PW = import.meta.env.VITE_EDITOR_PASSWORD || "";
+  const [canEdit, setCanEdit] = useState(!EDITOR_PW); // if no editor password is configured, editing is open
+  const alertCount = useMemo(() => buildAlerts(model, PROPERTIES.map((p) => p.id)).filter((a) => a.sev === "high").length, [model]);
 
-  // persistence
+  // ---- persistence (safety-critical) ----
+  // loadState must be "ok" before we EVER write. If the initial read fails we stay in "failed" and
+  // never save, because the in-memory model is empty at that point and writing it would destroy the
+  // shared dataset. (That exact sequence is what wiped the board once — do not simplify this.)
+  const [loadState, setLoadState] = useState("loading"); // loading | ok | failed
   useEffect(() => {
     (async () => {
-      try { const r = await window.storage.get("shp_dashboard_v1"); if (r && r.value) setModel(JSON.parse(r.value)); } catch (e) {}
+      try {
+        const m = await loadModel();
+        if (m) setModel(m);
+        setLoadState("ok");
+      } catch (e) {
+        console.error("loadModel failed — writes disabled to protect stored data:", e);
+        setLoadState("failed");
+      }
       setLoaded(true);
     })();
   }, []);
   useEffect(() => {
-    if (!loaded) return;
-    (async () => { try { await window.storage.set("shp_dashboard_v1", JSON.stringify(model)); } catch (e) {} })();
-  }, [model, loaded]);
+    if (loadState !== "ok" || !canEdit) return;   // never write on a failed/pending load
+    if (!modelHasData(model)) return;             // never write an empty model over real data
+    (async () => {
+      try {
+        const res = await saveModel(model);
+        if (res && res.ok === false) console.warn("saveModel did not persist:", res.reason);
+      } catch (e) { console.warn("saveModel error:", e); }
+    })();
+  }, [model, loadState, canEdit]);
 
   const handleFiles = useCallback(async (files) => {
     setBusy(true); setIngestMsg(null);
-    let added = 0, errors = [];
+    let added = 0, errors = [], routed = {}, prompts = [];
     for (const file of files) {
       try {
         const ext = file.name.split(".").pop().toLowerCase();
@@ -359,7 +1080,9 @@ export default function App() {
           const buf = await readFileAsArrayBuffer(file);
           const wb = XLSX.read(buf, { type: "array", cellDates: true });
           const ctx = { filename: file.name, propOverride: propOverride !== "auto" ? propOverride : null };
+          const SKIP_SHEET = /daily|weekly|analysis|title option|^sheet\s*\d+\s*$/i;
           for (const sn of wb.SheetNames) {
+            if (wb.SheetNames.length > 1 && SKIP_SHEET.test(String(sn).trim())) continue; // raw logs/scratch tabs poison property attribution
             const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: "" });
             records.push(...ingestSheet(rows, ctx));
           }
@@ -367,15 +1090,86 @@ export default function App() {
           records = await extractFromImageOrPdf(file);
           if (propOverride !== "auto") records = records.map((r) => ({ ...r, prop: propOverride }));
         } else { errors.push(`${file.name}: unsupported type`); continue; }
-        if (records.length) { setModel((m) => applyRecords(m, records)); added += records.length; }
-        else errors.push(`${file.name}: no recognizable rows`);
+        // a parsed report that couldn't be tied to a property → tell the user what we read and how to assign it
+        const need = records.find((r) => r.kind === "needprop");
+        records = records.filter((r) => r.kind !== "needprop");
+        if (need && !records.length) {
+          const chans = Object.entries(need.channels).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${fmtMoney(v)}`).join(", ");
+          prompts.push(`Read "${file.name}" — a ${need.report} report covering ${need.months.join(", ")}, ${fmtMoney(need.totalRevenue)} total (${chans}) — but it doesn't name a property. Set the "Assign to" dropdown above to the right property and re-upload, or put the property name in the filename (e.g. SOMA, Rambler).`);
+          continue;
+        }
+        records.forEach((r) => { if (r.prop && r.prop !== "unknown") routed[r.prop] = (routed[r.prop] || 0) + 1; });
+        if (records.length) {
+          setModel((m) => {
+            const before = m;
+            const after = applyRecords(m, records);
+            after.activity = buildActivity(before, after, file.name).concat(after.activity || []).slice(0, 40);
+            // Freshness log: which property + report type this file refreshed, when, and the newest
+            // month it covered. Lets the dashboard flag a stale RevPAR sitting next to a fresh channel file.
+            after.sources = { ...(after.sources || {}) };
+            const byProp = {};
+            records.forEach((r) => { if (!r.prop) return; (byProp[r.prop] = byProp[r.prop] || []).push(r); });
+            const kindLabel = (rs) => rs.some((r) => r.kind === "monthly" || r.kind === "listingmonth") ? "RevPAR / monthly" : rs.some((r) => r.kind === "res") ? "Channel / reservations" : rs[0]?.kind || "other";
+            Object.entries(byProp).forEach(([pid, rs]) => {
+              const months = rs.map((r) => r.month).filter(Boolean).sort();
+              const label = kindLabel(rs);
+              const key = `${pid}::${label}`;
+              after.sources[key] = { pid, report: label, file: file.name, uploadedAt: new Date().toISOString(), latestMonth: months[months.length - 1] || null, records: rs.length };
+            });
+            return after;
+          });
+          added += records.length;
+        } else errors.push(`${file.name}: no recognizable rows`);
       } catch (e) { errors.push(`${file.name}: ${e.message}`); }
     }
     setBusy(false);
-    setIngestMsg({ ok: added > 0, text: added ? `Ingested ${added} records.` : "Nothing ingested. " + errors.join("; "), errors });
+    const routedTxt = Object.keys(routed).length ? " → " + Object.keys(routed).map((id) => `${PROP_BY_ID[id]?.name || id} (${routed[id]})`).join(", ") : "";
+    if (prompts.length && !added) setIngestMsg({ ok: false, text: prompts.join(" "), errors });
+    else setIngestMsg({ ok: added > 0, text: added ? `Ingested ${added} records${routedTxt}.${prompts.length ? " " + prompts.join(" ") : ""}` : "Nothing ingested. " + errors.join("; "), errors });
   }, [propOverride]);
 
-  const onDrop = (e) => { e.preventDefault(); if (e.dataTransfer.files?.length) handleFiles([...e.dataTransfer.files]); };
+  const onDrop = (e) => { e.preventDefault(); if (!canEdit) return; if (e.dataTransfer.files?.length) handleFiles([...e.dataTransfer.files]); };
+  const tryUnlock = () => {
+    const entry = prompt("Enter editor password to unlock uploading & editing:");
+    if (entry == null) return;
+    if (entry === EDITOR_PW) setCanEdit(true);
+    else alert("Incorrect editor password.");
+  };
+
+  const runHfDebug = useCallback(async () => {
+    setBusy(true);
+    try { const dr = await fetch("/api/hostfully?debug=1"); const dj = await dr.json(); setHfDebug(JSON.stringify(dj, null, 2)); }
+    catch (e) { setHfDebug("Could not reach the diagnostics endpoint: " + e.message); }
+    setBusy(false);
+  }, []);
+
+  const refreshHostfully = useCallback(async () => {
+    setBusy(true); setIngestMsg(null); setHfDebug(null);
+    const showDebug = async (note) => {
+      try { const dr = await fetch("/api/hostfully?debug=1"); const dj = await dr.json(); setHfDebug(JSON.stringify(dj, null, 2)); } catch (e) {}
+      setIngestMsg({ ok: false, text: note });
+    };
+    try {
+      const res = await fetch("/api/hostfully");
+      const data = await res.json();
+      if (!res.ok) { await showDebug(data.error || "Hostfully request failed — diagnostic shown below."); setBusy(false); return; }
+      const records = [];
+      for (const r of data.rows || []) {
+        const prop = classifyListing(r.propertyName); if (!prop) continue;
+        const d = toDate(r.checkIn); if (!d) continue;
+        const out = r.checkOut ? toDate(r.checkOut) : null;
+        const nights = out ? Math.max(1, Math.round((out - d) / 86400000)) : 1;
+        records.push({ kind: "res", prop, month: mkey(d.getFullYear(), d.getMonth()), year: d.getFullYear(), mIdx: d.getMonth(), revenue: r.amount, nights, source: r.source });
+      }
+      if (!records.length) { await showDebug(`Hostfully connected (${data.bookedCount || 0} bookings, ${data.count || 0} with revenue) but none mapped to a property. Diagnostic shown below.`); setBusy(false); return; }
+      const routed = {}; records.forEach((r) => { routed[r.prop] = (routed[r.prop] || 0) + 1; });
+      setModel((m) => { const after = applyRecords(m, records); after.activity = [{ ts: new Date().toISOString(), pid: null, text: `Synced ${records.length} bookings from Hostfully` }].concat(after.activity || []).slice(0, 40); return after; });
+      setIngestMsg({ ok: true, text: `Synced ${records.length} Hostfully bookings → ` + Object.keys(routed).map((id) => `${PROP_BY_ID[id]?.short} (${routed[id]})`).join(", ") });
+    } catch (e) {
+      await showDebug(e.message.includes("not set") ? "Add HOSTFULLY_API_KEY in Vercel to enable this." : `Hostfully sync failed: ${e.message}`);
+    }
+    setBusy(false);
+  }, []);
 
   const hasData = Object.keys(model.properties).length > 0;
 
@@ -396,20 +1190,39 @@ export default function App() {
             <div style={{ fontFamily: "Georgia, serif", fontSize: 23, fontWeight: 700, lineHeight: 1.1, marginTop: 4 }}>SHP Reporting<br />Dashboard</div>
           </div>
           <NavItem icon={<LayoutGrid size={17} />} label="Overview" active={page === "overview"} onClick={() => setPage("overview")} color="#8ea0b8" />
-          <div style={{ fontSize: 10, letterSpacing: 2, color: "#6c7d96", margin: "16px 8px 6px", fontWeight: 700 }}>PROPERTIES</div>
-          {PROPERTIES.map((p) => (
-            <NavItem key={p.id} icon={<Building2 size={17} />} label={p.name} active={page === p.id} onClick={() => setPage(p.id)} color={p.color} dot />
+          {REGIONS.map((rg) => (
+            <div key={rg.id}>
+              <button className="navbtn ui" onClick={() => setPage("region:" + rg.id)}
+                style={{ width: "100%", textAlign: "left", background: page === "region:" + rg.id ? "rgba(255,255,255,.10)" : "transparent", color: "#dfe6ef", border: "none", borderRadius: 7, padding: "9px 11px", fontSize: 12, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", cursor: "pointer", display: "flex", alignItems: "center", gap: 8, marginTop: 14, marginBottom: 2 }}>
+                <MapPin size={15} style={{ color: "#8ea0b8" }} /> {rg.name}
+              </button>
+              {PROPS_IN(rg.id).filter((p) => p.group !== "khorrami").map((p) => (
+                <div key={p.id} style={{ paddingLeft: 12 }}>
+                  <NavItem icon={<Building2 size={16} />} label={p.name} active={page === p.id} onClick={() => setPage(p.id)} color={p.color} dot />
+                </div>
+              ))}
+              {PROPS_IN(rg.id).some((p) => p.group === "khorrami") && (
+                <div style={{ paddingLeft: 12 }}>
+                  <NavItem icon={<Building2 size={16} />} label="Khorrami" active={page === "khorrami"} onClick={() => setPage("khorrami")} color={KHORRAMI.color} dot />
+                </div>
+              )}
+            </div>
           ))}
           <div style={{ fontSize: 10, letterSpacing: 2, color: "#6c7d96", margin: "16px 8px 6px", fontWeight: 700 }}>INTELLIGENCE</div>
+          <NavItem icon={<AlertTriangle size={17} />} label="Alerts" active={page === "alerts"} onClick={() => setPage("alerts")} color="#8ea0b8" notify={alertCount} />
+          <NavItem icon={<Activity size={17} />} label="Data freshness" active={page === "freshness"} onClick={() => setPage("freshness")} color="#8ea0b8" />
+          <NavItem icon={<Building2 size={17} />} label="Units" active={page === "units"} onClick={() => setPage("units")} color="#8ea0b8" />
           <NavItem icon={<Calendar size={17} />} label="Events" active={page === "events"} onClick={() => setPage("events")} color="#8ea0b8" />
+          <NavItem icon={<TrendingUp size={17} />} label="Ad Performance" active={page === "ads"} onClick={() => setPage("ads")} color="#8ea0b8" />
           <NavItem icon={<MessageSquare size={17} />} label="Ask the Board" active={page === "ask"} onClick={() => setPage("ask")} color="#8ea0b8" />
+          <NavItem icon={<Search size={17} />} label="Data Audit" active={page === "audit"} onClick={() => setPage("audit")} color="#8ea0b8" />
 
           <div style={{ marginTop: 24, padding: "0 8px" }}>
             <div style={{ fontSize: 10, color: "#6c7d96" }}>
               {model.lastUpdated ? "Updated " + new Date(model.lastUpdated).toLocaleString() : "No data yet"}
             </div>
-            {hasData && (
-              <button className="ui navbtn" onClick={() => { if (confirm("Clear all stored data?")) setModel(MODEL); }}
+            {hasData && canEdit && (
+              <button className="ui navbtn" onClick={() => { if (confirm("Clear all stored data? This clears it for everyone.")) setModel(MODEL); }}
                 style={{ marginTop: 10, fontSize: 11, background: "transparent", color: "#9fb0c6", border: `1px solid #3a4a5f`, borderRadius: 7, padding: "5px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
                 <Trash2 size={12} /> Reset data
               </button>
@@ -420,25 +1233,54 @@ export default function App() {
         {/* MAIN */}
         <main style={{ flex: 1, minWidth: 0 }} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
           {/* Top upload bar */}
-          <div className="ui" style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "12px 28px", display: "flex", alignItems: "center", gap: 14, position: "sticky", top: 0, zIndex: 5 }}>
+          <div className="ui no-print" style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "12px 28px", display: "flex", alignItems: "center", gap: 14, position: "sticky", top: 0, zIndex: 5 }}>
             <input ref={fileRef} type="file" multiple accept=".xlsx,.xls,.csv,.tsv,.png,.jpg,.jpeg,.pdf" style={{ display: "none" }}
               onChange={(e) => { if (e.target.files?.length) handleFiles([...e.target.files]); e.target.value = ""; }} />
-            <button className="navbtn" onClick={() => fileRef.current?.click()} disabled={busy}
-              style={{ background: C.slate, color: "#fff", border: "none", borderRadius: 9, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
-              {busy ? <Loader2 size={15} className="spin" style={{ animation: "spin 1s linear infinite" }} /> : <Upload size={15} />} Upload data
+            {canEdit ? (
+              <>
+                <button className="navbtn" onClick={() => fileRef.current?.click()} disabled={busy}
+                  style={{ background: C.slate, color: "#fff", border: "none", borderRadius: 9, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+                  {busy ? <Loader2 size={15} className="spin" style={{ animation: "spin 1s linear infinite" }} /> : <Upload size={15} />} Upload data
+                </button>
+                <span style={{ fontSize: 12, color: C.muted }}>.xlsx · .csv · .png · .jpg · .pdf — drag & drop anywhere</span>
+                <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 11, color: C.muted }}>Assign to:</span>
+                  <select value={propOverride} onChange={(e) => setPropOverride(e.target.value)}
+                    style={{ fontSize: 12, padding: "6px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink }}>
+                    <option value="auto">Auto-detect</option>
+                    {PROPERTIES.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <>
+                <span style={{ fontSize: 13, color: C.muted, display: "flex", alignItems: "center", gap: 8 }}><Eye size={15} /> View-only — the board updates automatically when the owner uploads new reports.</span>
+                <button className="navbtn" onClick={tryUnlock}
+                  style={{ marginLeft: "auto", background: "transparent", color: C.slate, border: `1px solid ${C.border}`, borderRadius: 9, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+                  <Lock size={14} /> Unlock editing
+                </button>
+              </>
+            )}
+            <button className="navbtn no-print" onClick={() => window.print()} title="Save this view as PDF"
+              style={{ background: "transparent", color: C.slate, border: `1px solid ${C.border}`, borderRadius: 9, padding: "8px 13px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+              <FileText size={14} /> PDF
             </button>
-            <span style={{ fontSize: 12, color: C.muted }}>.xlsx · .csv · .png · .jpg · .pdf — drag & drop anywhere</span>
-            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 11, color: C.muted }}>Assign to:</span>
-              <select value={propOverride} onChange={(e) => setPropOverride(e.target.value)}
-                style={{ fontSize: 12, padding: "6px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink }}>
-                <option value="auto">Auto-detect</option>
-                {PROPERTIES.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </div>
-            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+            <style>{`@keyframes spin{to{transform:rotate(360deg)}}
+              @media print {
+                .no-print, nav, aside { display: none !important; }
+                body { background: #fff !important; }
+                .sidebar-root { display: none !important; }
+                .print-main { margin: 0 !important; padding: 0 !important; width: 100% !important; }
+                .recharts-wrapper { page-break-inside: avoid; }
+              }`}</style>
           </div>
 
+          {loadState === "failed" && (
+            <div className="ui no-print" style={{ margin: "14px 28px 0", padding: "11px 14px", borderRadius: 10, background: "#fdeeee", border: "1px solid #f2cccc", color: "#8a2020", fontSize: 13, display: "flex", alignItems: "center", gap: 9 }}>
+              <AlertTriangle size={16} />
+              <span><b>Could not load shared data.</b> Saving is disabled so nothing gets overwritten. Refresh the page — if this keeps happening, check the Supabase connection before uploading anything.</span>
+            </div>
+          )}
           {ingestMsg && (
             <div className="ui" style={{ margin: "12px 28px 0", padding: "10px 14px", borderRadius: 9, fontSize: 13, background: ingestMsg.ok ? "#eaf6ef" : "#fdeeee", color: ingestMsg.ok ? C.good : C.bad, border: `1px solid ${ingestMsg.ok ? "#cfe9da" : "#f2cccc"}`, display: "flex", justifyContent: "space-between" }}>
               <span>{ingestMsg.text}</span>
@@ -449,9 +1291,16 @@ export default function App() {
           <div style={{ padding: "26px 28px 60px" }}>
             {!loaded ? <div className="ui" style={{ color: C.muted }}>Loading…</div>
               : page === "overview" ? <Overview model={model} hasData={hasData} onUpload={() => fileRef.current?.click()} goto={setPage} />
+                : page === "khorrami" ? <KhorramiPage model={model} setModel={setModel} />
+                : page === "alerts" ? <AlertsPage model={model} />
+                : page === "units" ? <UnitsPage model={model} setModel={setModel} canEdit={canEdit} />
+                : page === "freshness" ? <FreshnessPage model={model} />
+                : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={model} goto={setPage} />
                 : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
                   : page === "ask" ? <AskPage model={model} />
-                    : <PropertyPage pid={page} model={model} />}
+                    : page === "audit" ? <AuditPage model={model} setModel={setModel} />
+                    : page === "ads" ? <AdPage model={model} />
+                    : <PropertyPage pid={page} model={model} setModel={setModel} />}
           </div>
         </main>
       </div>
@@ -460,40 +1309,38 @@ export default function App() {
 }
 
 /* ---------------- nav ---------------- */
-function NavItem({ icon, label, active, onClick, color, dot }) {
+function NavItem({ icon, label, active, onClick, color, dot, notify }) {
   return (
     <button className="navbtn ui" onClick={onClick}
       style={{ width: "100%", textAlign: "left", background: active ? "rgba(255,255,255,.10)" : "transparent", color: active ? "#fff" : "#c4cfde", border: "none", borderLeft: `3px solid ${active ? color : "transparent"}`, borderRadius: 7, padding: "9px 11px", fontSize: 13.5, fontWeight: active ? 600 : 500, cursor: "pointer", display: "flex", alignItems: "center", gap: 10, marginBottom: 2 }}>
       {dot ? <span style={{ width: 9, height: 9, borderRadius: 9, background: color, flexShrink: 0 }} /> : <span style={{ color }}>{icon}</span>}
       {label}
+      {notify > 0 && <span style={{ marginLeft: "auto", minWidth: 18, height: 18, padding: "0 5px", borderRadius: 9, background: "#e23b3b", color: "#fff", fontSize: 11, fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{notify}</span>}
     </button>
   );
 }
 
 /* ---------------- KPI cards ---------------- */
-function KpiRow({ d, accent }) {
-  const L = d?.latest;
-  const dRev = d?.prev ? delta(L?.revenue, d.prev.revenue) : null;
-  const dOcc = d?.prev ? delta(L?.occ, d.prev.occ) : null;
-  const dAdr = d?.prev ? delta(L?.adr, d.prev.adr) : null;
-  const dRp = d?.prev ? delta(L?.revpar, d.prev.revpar) : null;
+function KpiRow({ k, accent }) {
   const cards = [
-    { label: "Revenue", icon: <DollarSign size={16} />, val: fmtMoney(L?.revenue), dl: dRev },
-    { label: "Occupancy", icon: <Percent size={16} />, val: fmtPct(L?.occ), dl: dOcc },
-    { label: "ADR", icon: <BedDouble size={16} />, val: fmtMoney(L?.adr), dl: dAdr },
-    { label: "RevPAR", icon: <Gauge size={16} />, val: fmtMoney(L?.revpar), dl: dRp },
+    { label: "Current Month Revenue", sub: k.currentMonthCompareVal != null ? `${k.currentMonthLabel} · ${k.currentMonthCompareLabel} ${fmtMoney(k.currentMonthCompareVal)}` : k.currentMonthLabel, icon: <DollarSign size={15} />, val: fmtMoney(k.currentMonthRevenue), dl: k.currentMonthDelta, dlLabel: k.currentMonthDeltaLabel },
+    { label: "YTD Revenue", sub: k.ytdLabel, icon: <Calendar size={15} />, val: fmtMoney(k.ytdRevenue), dl: k.ytdDelta, dlLabel: "YoY" },
+    { label: "Occupancy", sub: k.metricLabel, icon: <Percent size={15} />, val: fmtPct(k.occ), dl: k.occDelta, dlLabel: "MoM" },
+    { label: "ADR", sub: k.metricLabel, icon: <BedDouble size={15} />, val: fmtMoney(k.adr), dl: k.adrDelta, dlLabel: "MoM" },
+    { label: "RevPAR", sub: k.metricLabel, icon: <Gauge size={15} />, val: fmtMoney(k.revpar), dl: k.revparDelta, dlLabel: "MoM" },
   ];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: 12 }}>
       {cards.map((c) => (
-        <div key={c.label} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: "18px 20px", borderTop: `3px solid ${accent}` }}>
-          <div className="ui" style={{ display: "flex", alignItems: "center", gap: 7, color: C.muted, fontSize: 12, fontWeight: 600, letterSpacing: .3, textTransform: "uppercase" }}>
-            <span style={{ color: accent }}>{c.icon}</span>{c.label}
+        <div key={c.label} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: "15px 16px", borderTop: `3px solid ${accent}` }}>
+          <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, color: C.muted, fontSize: 10.5, fontWeight: 700, letterSpacing: .3, textTransform: "uppercase", lineHeight: 1.25, minHeight: 26 }}>
+            <span style={{ color: accent, flexShrink: 0 }}>{c.icon}</span>{c.label}
           </div>
-          <div style={{ fontFamily: "Georgia, serif", fontSize: 30, fontWeight: 700, marginTop: 8, color: C.ink }}>{c.val}</div>
+          <div style={{ fontFamily: "Georgia, serif", fontSize: 25, fontWeight: 700, marginTop: 7, color: C.ink }}>{c.val}</div>
+          <div className="ui" style={{ fontSize: 10.5, color: C.faint, marginTop: 2 }}>{c.sub}</div>
           {c.dl != null && (
-            <div className="ui" style={{ marginTop: 4, fontSize: 12.5, fontWeight: 600, color: c.dl >= 0 ? C.good : C.bad, display: "flex", alignItems: "center", gap: 4 }}>
-              {c.dl >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />} {(c.dl * 100).toFixed(1)}% MoM
+            <div className="ui" style={{ marginTop: 4, fontSize: 12, fontWeight: 600, color: c.dl >= 0 ? C.good : C.bad, display: "flex", alignItems: "center", gap: 4 }}>
+              {c.dl >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />} {(c.dl * 100).toFixed(1)}% {c.dlLabel}
             </div>
           )}
         </div>
@@ -523,45 +1370,145 @@ function SectionTitle({ children, sub }) {
 }
 
 /* ---------------- charts ---------------- */
-function YoyChart({ d }) {
-  if (!d?.yoy?.length || d.priorY == null) return <Empty text="Year-over-year appears once a prior-year file is loaded." />;
+const METRIC_DEFS = [
+  { id: "revenue", label: "Revenue", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <DollarSign size={15} /> },
+  { id: "occ", label: "Occupancy", fmt: (v) => v == null ? "—" : fmtPct(v), icon: <Percent size={15} /> },
+  { id: "adr", label: "ADR", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <BedDouble size={15} /> },
+  { id: "revpar", label: "RevPAR", fmt: (v) => v == null ? "—" : fmtMoney(v), icon: <Gauge size={15} /> },
+];
+
+function RevenueChart({ d, metric = "revenue" }) {
+  const [showOcc, setShowOcc] = useState(false);
+  const mDef = METRIC_DEFS.find((x) => x.id === metric) || METRIC_DEFS[0];
+  const isPct = metric === "occ";
+  const fmtV = (v) => v == null ? "—" : (isPct ? fmtPct(v) : fmtMoney(v));
+  const mode = d.meta.compareMode || (d.priorY != null ? "yoy" : "mom");
+  const now = new Date();
+  const cur = d.curY;
+  const curMonths = (cur != null && d.byYear?.[cur]) ? d.byYear[cur] : {};
+  const priorMonths = (mode === "yoy" && d.priorY != null && d.byYear?.[d.priorY]) ? d.byYear[d.priorY] : {};
+  // months that actually have data this year
+  const idxs = MONTHS.map((_, i) => i).filter((i) => curMonths[i] || priorMonths[i]);
+  if (!idxs.length) return <Empty text="Revenue by month appears once a monthly or RevPAR report is loaded." />;
+  const defIdx = idxs.includes(now.getMonth()) ? now.getMonth() : idxs[idxs.length - 1];
+  const [focus, setFocus] = useState(defIdx);
+  useEffect(() => { setFocus(defIdx); }, [defIdx]);
+
+  const data = idxs.map((i) => ({
+    month: MONTHS[i],
+    cur: curMonths[i]?.[metric] ?? null,
+    prior: priorMonths[i]?.[metric] ?? null,
+    occ: curMonths[i]?.occ ?? null,
+  }));
+  // headline comparison for the focused month
+  const fCur = curMonths[focus]?.[metric] ?? null;
+  let cmpVal, cmpLabel;
+  if (mode === "yoy") { cmpVal = priorMonths[focus]?.[metric] ?? null; cmpLabel = `${MONTHS[focus]} ${d.priorY}`; }
+  else { const p = curMonths[focus - 1]?.[metric] ?? null; cmpVal = p; cmpLabel = focus > 0 ? `${MONTHS[focus - 1]} ${cur}` : "prev mo"; }
+  const dl = (cmpVal != null && cmpVal > 0 && fCur != null) ? (fCur - cmpVal) / cmpVal : null;
+  const accent = d.meta.color;
+
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <ComposedChart data={d.yoy} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-        <XAxis dataKey="month" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
-        <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
-        <Legend wrapperStyle={{ fontSize: 12 }} />
-        <Bar dataKey={String(d.priorY)} fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${d.priorY}`} />
-        <Bar dataKey={String(d.curY)} fill={d.meta.color} radius={[4, 4, 0, 0]} name={`${d.curY}`} />
-      </ComposedChart>
-    </ResponsiveContainer>
+    <div>
+      <div className="ui" style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+        <select value={focus} onChange={(e) => setFocus(+e.target.value)} style={{ fontSize: 12.5, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink, cursor: "pointer" }}>
+          {idxs.slice().reverse().map((i) => <option key={i} value={i}>{MONTHS[i]} {cur}{i === now.getMonth() ? " (current)" : ""}</option>)}
+        </select>
+        <span style={{ fontSize: 13 }}>
+          <b>{fmtV(fCur)}</b>
+          <span style={{ color: C.muted }}> vs {cmpLabel} {fmtV(cmpVal)}</span>
+          {dl != null && <b style={{ marginLeft: 6, color: dl >= 0 ? C.good : C.bad }}>{dl >= 0 ? "+" : ""}{(dl * 100).toFixed(0)}% {mode === "yoy" ? "YoY" : "MoM"}</b>}
+        </span>
+        {!isPct && <button onClick={() => setShowOcc((s) => !s)} style={{ marginLeft: "auto", fontSize: 12, fontWeight: 600, padding: "5px 11px", borderRadius: 7, cursor: "pointer", border: `1px solid ${showOcc ? accent : C.border}`, background: showOcc ? accent : "#fff", color: showOcc ? "#fff" : C.sub }}>
+          {showOcc ? "Hide occupancy" : "Show occupancy"}
+        </button>}
+      </div>
+      <ResponsiveContainer width="100%" height={260}>
+        <ComposedChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+          <XAxis dataKey="month" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <YAxis yAxisId="rev" domain={isPct ? [0, 1] : undefined} tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => isPct ? (v * 100).toFixed(0) + "%" : (metric === "revenue" ? "$" + (v / 1000).toFixed(0) + "k" : "$" + Math.round(v))} />
+          {showOcc && <YAxis yAxisId="occ" orientation="right" domain={[0, 1]} tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => (v * 100).toFixed(0) + "%"} />}
+          <Tooltip formatter={(v, name) => name === "Occupancy" ? fmtPct(v) : fmtV(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          {mode === "yoy" && <Bar yAxisId="rev" dataKey="prior" fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${d.priorY}`} />}
+          <Bar yAxisId="rev" dataKey="cur" fill={accent} radius={[4, 4, 0, 0]} name={`${cur}`} />
+          {showOcc && <ReferenceLine yAxisId="occ" y={0.7} stroke={C.bad} strokeDasharray="5 4" strokeWidth={1.5} label={{ value: "70% goal", position: "insideTopRight", fontSize: 10, fill: C.bad }} />}
+          {showOcc && <Line yAxisId="occ" type="monotone" dataKey="occ" name="Occupancy" stroke={C.ink} strokeWidth={2.5} dot={{ r: 2.5, fill: C.ink }} connectNulls />}
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
+const STANDARD_CHANNELS = ["Airbnb", "Vrbo", "Expedia", "Booking.com", "Direct"];
+// Contracted channel costs (confirmed by Christian, Jul 2026). Direct pays no commission but still
+// carries card processing. "Other" uses a conservative placeholder.
+const CHANNEL_COST = { "Airbnb": 0.155, "Booking.com": 0.22, "Expedia": 0.18, "Vrbo": 0.08, "Direct": 0.03, "Other": 0.15 };
+// Revenue budget by property/month. Seeded from the Outpost Fort Worth LLC P&L (Hotel SOMA, 2026).
+// Editable in the app; stored on the model so it syncs to the team.
+const DEFAULT_BUDGETS = {
+  soma: { "2026-05": 55814.30, "2026-06": 80000, "2026-07": 100000, "2026-08": 100000, "2026-09": 150000, "2026-10": 170000, "2026-11": 180000, "2026-12": 180000 },
+};
 function OtaChart({ d }) {
-  if (!d?.ota?.length) return <Empty text="OTA mix appears when reservation-level data (with a SOURCE column) is loaded." />;
-  const total = d.ota.reduce((a, o) => a + o.value, 0);
+  const obm = d?.otaByMonth || {};
+  const monthKeys = Object.keys(obm).filter((k) => Object.values(obm[k] || {}).some((v) => v > 0)).sort();
+  const now = new Date(); const curKey = mkey(now.getFullYear(), now.getMonth());
+  const mLabel = (k) => { const [y, m] = k.split("-").map(Number); return `${MONTHS[m - 1]} ${y}`; };
+  const defScope = monthKeys.includes(curKey) ? curKey : (monthKeys.length ? monthKeys[monthKeys.length - 1] : "all");
+  const [scope, setScope] = useState(defScope);
+  useEffect(() => { setScope(defScope); }, [defScope]);
+  const accent = d?.meta?.color || C.ink;
+
+  const map = {};
+  if (scope === "all") { (d?.ota || []).forEach((o) => { map[o.name] = (map[o.name] || 0) + o.value; }); }
+  else { Object.entries(obm[scope] || {}).forEach(([k, v]) => { map[k] = (map[k] || 0) + v; }); }
+  const total = Object.values(map).reduce((a, v) => a + v, 0);
+  const names = [...STANDARD_CHANNELS, ...Object.keys(map).filter((n) => !STANDARD_CHANNELS.includes(n))];
+  const rows = names.map((name) => ({ name, value: map[name] || 0 }));
+  const pieData = rows.filter((r) => r.value > 0);
+
+  const hasAnyMonth = monthKeys.length > 0;
+  const selector = (
+    <div className="ui" style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+      <button onClick={() => setScope(monthKeys.includes(curKey) ? curKey : defScope)} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${scope !== "all" ? accent : C.border}`, background: scope !== "all" ? accent : "#fff", color: scope !== "all" ? "#fff" : C.sub }}>By month</button>
+      <button onClick={() => setScope("all")} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${scope === "all" ? accent : C.border}`, background: scope === "all" ? accent : "#fff", color: scope === "all" ? "#fff" : C.sub }}>All time</button>
+      {scope !== "all" && hasAnyMonth && (
+        <select value={scope} onChange={(e) => setScope(e.target.value)} style={{ fontSize: 12.5, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink, cursor: "pointer" }}>
+          {monthKeys.slice().reverse().map((k) => <option key={k} value={k}>{mLabel(k)}{k === curKey ? " (current)" : ""}</option>)}
+        </select>
+      )}
+      <span style={{ fontSize: 12, color: C.muted, marginLeft: "auto" }}>{scope === "all" ? "All time" : `${mLabel(scope)} — on the books`} · {fmtMoney(total)}</span>
+    </div>
+  );
+
+  if (!hasAnyMonth && !total) return <Empty text="Channel mix appears once channel/reservation data (with a source column) is loaded. All five channels will populate here." />;
   return (
-    <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-      <ResponsiveContainer width={200} height={200}>
-        <PieChart>
-          <Pie data={d.ota} dataKey="value" nameKey="name" innerRadius={52} outerRadius={86} paddingAngle={2}>
-            {d.ota.map((o) => <Cell key={o.name} fill={OTA_COLORS[o.name] || OTA_COLORS.Other} />)}
-          </Pie>
-          <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
-        </PieChart>
-      </ResponsiveContainer>
-      <div className="ui" style={{ flex: 1, minWidth: 160 }}>
-        {d.ota.sort((a, b) => b.value - a.value).map((o) => (
-          <div key={o.name} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", fontSize: 13, borderBottom: `1px solid ${C.track}` }}>
-            <span style={{ width: 11, height: 11, borderRadius: 3, background: OTA_COLORS[o.name] || OTA_COLORS.Other }} />
-            <span style={{ flex: 1, color: C.ink }}>{o.name}</span>
-            <span style={{ fontWeight: 600 }}>{fmtMoney(o.value)}</span>
-            <span style={{ color: C.muted, width: 44, textAlign: "right" }}>{((o.value / total) * 100).toFixed(0)}%</span>
+    <div>
+      {selector}
+      {!total ? (
+        <Empty text={`No channel bookings on the books for ${scope === "all" ? "any period" : mLabel(scope)} yet. Switch the period above.`} />
+      ) : (
+        <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <ResponsiveContainer width={200} height={200}>
+            <PieChart>
+              <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={52} outerRadius={86} paddingAngle={2}>
+                {pieData.map((o) => <Cell key={o.name} fill={OTA_COLORS[o.name] || OTA_COLORS.Other} />)}
+              </Pie>
+              <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+            </PieChart>
+          </ResponsiveContainer>
+          <div className="ui" style={{ flex: 1, minWidth: 160 }}>
+            {rows.sort((a, b) => b.value - a.value).map((o) => (
+              <div key={o.name} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", fontSize: 13, borderBottom: `1px solid ${C.track}`, opacity: o.value ? 1 : 0.5 }}>
+                <span style={{ width: 11, height: 11, borderRadius: 3, background: OTA_COLORS[o.name] || OTA_COLORS.Other }} />
+                <span style={{ flex: 1, color: C.ink }}>{o.name}</span>
+                <span style={{ fontWeight: 600 }}>{fmtMoney(o.value)}</span>
+                <span style={{ color: C.muted, width: 44, textAlign: "right" }}>{total ? ((o.value / total) * 100).toFixed(0) : 0}%</span>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -584,71 +1531,229 @@ function TrendChart({ series, dataKey, color, fmt }) {
 }
 function Empty({ text }) { return <div className="ui" style={{ color: C.faint, fontSize: 13, padding: "30px 6px", textAlign: "center" }}>{text}</div>; }
 
-/* ---------------- OVERVIEW ---------------- */
+/* ---------------- OVERVIEW + REGION (shared PortfolioView) ---------------- */
 function Overview({ model, hasData, onUpload, goto }) {
-  const derived = useMemo(() => PROPERTIES.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model]);
-  // portfolio current-month rollup
-  const portfolio = useMemo(() => {
-    let rev = 0, nights = 0, avail = 0, revWeighted = 0, adrW = 0, adrN = 0;
-    derived.forEach((d) => {
-      if (!d.latest || d.latest.isSnapshot) return; const L = d.latest;
-      rev += L.revenue || 0; nights += L.nights || 0;
-      const days = daysInMonth(L.year, L.mIdx); avail += d.meta.units * days;
-      if (L.adr) { adrW += L.adr * (L.nights || 1); adrN += (L.nights || 1); }
-    });
-    return { latest: { revenue: rev, occ: avail ? Math.min(1, nights / avail) : null, adr: adrN ? adrW / adrN : null, revpar: avail ? rev / avail : null, nights }, prev: null };
-  }, [derived]);
+  return <PortfolioView model={model} props={PROPERTIES} title="Portfolio Overview" sub="Everything under SHP management, across Fort Worth & Arlington" accent={C.slate} goto={goto} hasData={hasData} onUpload={onUpload} channelTitle="Channel mix — entire portfolio" />;
+}
+function RegionPage({ region, model, goto }) {
+  const rg = REGIONS.find((r) => r.id === region);
+  const props = PROPS_IN(region);
+  return <PortfolioView model={model} props={props} title={rg ? rg.name : "Region"} sub={`${props.length} properties in ${rg ? rg.name : region}`} accent={C.slate} goto={goto} hasData channelTitle={`Channel mix — ${rg ? rg.name : region}`} regionMode />;
+}
 
-  const compare = derived.map((d) => ({ name: d.meta.short, revenue: d.latest?.revenue || 0, color: d.meta.color }));
+// Linked squares + bar graph. Period control drives BOTH. Clicking a square selects the metric the
+// bar graph plots. Independent toggles: YoY/MoM comparison on the squares; prior-year and prior-month
+// paired bars on the graph.
+// A property earns a YoY comparison only if it has a COMPLETE 12-month prior year.
+// Anything less (no 2025, or a partial stub like Woodbrook's Oct–Dec) shows MoM instead.
+function hasFullPriorYear(d, now = new Date()) {
+  const py = now.getFullYear() - 1;
+  const yr = d?.byYear?.[py];
+  if (!yr) return false;
+  let n = 0;
+  for (let i = 0; i < 12; i++) if (yr[i] && (yr[i].revenue != null)) n++;
+  return n >= 12;
+}
+// Shared control state for the squares + the linked chart.
+function useMetricsState(d, alwaysYoy) {
+  const full = alwaysYoy || hasFullPriorYear(d);
+  const [period, setPeriod] = useState("mtd");
+  const [metric, setMetric] = useState("revenue");
+  const [cmp, setCmp] = useState(full ? "yoy" : "mom");
+  useEffect(() => { if (!full && cmp === "yoy") setCmp("mom"); }, [full]);
+  return { period, setPeriod, metric, setMetric, cmp, setCmp, canYoy: full };
+}
+
+function MetricsSquares({ d, accent, ctl }) {
+  const { period, setPeriod, metric, setMetric, cmp, setCmp, canYoy } = ctl;
+  const now = new Date();
+
+  const statsByMetric = {};
+  METRIC_DEFS.forEach((m) => { statsByMetric[m.id] = periodStats(d, period, m.id, now); });
+  const active = statsByMetric[metric];
+  const mDef = METRIC_DEFS.find((m) => m.id === metric);
+
+  const periodTag = PERIOD_DEFS.find((p) => p.id === period)?.label || "";
+  const cmpLabel = (mid) => {
+    const st = statsByMetric[mid];
+    const useYoy = cmp === "yoy" && st.yoyValue != null; // auto-fall back to MoM where no prior year
+    const cmpVal = useYoy ? st.yoyValue : st.momValue;
+    const base = st.value;
+    const dl = (cmpVal != null && cmpVal !== 0 && base != null) ? (base - cmpVal) / Math.abs(cmpVal) : null;
+    const fmt = METRIC_DEFS.find((m) => m.id === mid).fmt;
+    let vsText;
+    if (useYoy) vsText = period === "ytd" ? `${now.getFullYear() - 1} total` : `LY ${fmt(cmpVal)}`;
+    else vsText = period === "mtd" ? `prev mo ${fmt(cmpVal)}` : `prev ${fmt(cmpVal)}`;
+    return { dl, vsText, kind: useYoy ? "YoY" : "MoM" };
+  };
+
+  const pill = (oncl, on, label, key) => (
+    <button key={key} onClick={oncl} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${on ? accent : C.border}`, background: on ? accent : "#fff", color: on ? "#fff" : C.sub }}>{label}</button>
+  );
 
   return (
     <div>
-      <SectionTitle sub="Portfolio performance, current month across all properties">Portfolio Overview</SectionTitle>
-      {!hasData && (
+      {/* period control — drives these squares AND the linked chart below */}
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+        {PERIOD_DEFS.map((p) => pill(() => setPeriod(p.id), period === p.id, p.label, p.id))}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontSize: 11.5, color: C.muted }}>Compare:</span>
+          {canYoy && pill(() => setCmp("yoy"), cmp === "yoy", "YoY", "cyoy")}
+          {pill(() => setCmp("mom"), cmp === "mom", "MoM", "cmom")}
+        </div>
+      </div>
+
+      {/* squares — click to drive the bar graph */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 16 }}>
+        {METRIC_DEFS.map((m) => {
+          const st = statsByMetric[m.id];
+          const c = cmpLabel(m.id);
+          const selected = metric === m.id;
+          return (
+            <button key={m.id} onClick={() => setMetric(m.id)} style={{ textAlign: "left", cursor: "pointer", background: C.panel, border: `1px solid ${selected ? accent : C.border}`, borderRadius: 14, padding: "16px 16px 14px", boxShadow: selected ? `0 0 0 1px ${accent}` : "none" }}>
+              <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .5 }}>{m.icon}{m.label}</div>
+              <div style={{ fontFamily: "Georgia,serif", fontSize: 26, fontWeight: 700, marginTop: 6, color: (m.id === "occ" && st.value > 1.0001) ? C.bad : undefined }}>{m.fmt(st.value)}</div>
+              {m.id === "occ" && st.value > 1.0001 && <div className="ui" style={{ fontSize: 10.5, color: C.bad, fontWeight: 700, marginTop: 2 }}>⚠ over 100% — check unit count on the Units page</div>}
+              {m.id === "revenue" && period === "mtd" && (() => {
+                const now2 = new Date(); const k = `${now2.getFullYear()}-${String(now2.getMonth() + 1).padStart(2, "0")}`;
+                const disc = d.revDisc && d.revDisc[k];
+                return disc ? <div className="ui" style={{ fontSize: 10.5, color: "#b7791f", fontWeight: 600, marginTop: 3, lineHeight: 1.35 }}>⚠ RevPAR {fmtMoney(disc.headline)} · channel report {fmtMoney(disc.channel)}</div> : null;
+              })()}
+              <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 3 }}>{periodTag}</div>
+              <div className="ui" style={{ fontSize: 12, marginTop: 4 }}>
+                {c.dl != null ? <span style={{ color: c.dl >= 0 ? C.good : C.bad, fontWeight: 700 }}>{c.dl >= 0 ? "▲" : "▼"} {Math.abs(c.dl * 100).toFixed(1)}% {c.kind}</span> : <span style={{ color: C.faint }}>— {c.kind}</span>}
+                <span style={{ color: C.muted }}> · {c.vsText}</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+    </div>
+  );
+}
+
+// The ORIGINAL "Revenue by property" chart — one bar per property — now driven by the shared
+// period + metric control, with optional paired Last-year / Last-month bars.
+function PropertyBars({ derived, ctl, accent }) {
+  const { period, metric } = ctl;
+  const [showPY, setShowPY] = useState(false);
+  const [showPM, setShowPM] = useState(false);
+  const now = new Date();
+  const mDef = METRIC_DEFS.find((m) => m.id === metric);
+  const data = derived.map((d) => {
+    const s = periodStats(d, period, metric, now);
+    return { name: d.meta.short, color: d.meta.color, cur: s.value, prevYear: s.yoyValue, prevMonth: s.momValue };
+  });
+  const isPct = metric === "occ";
+  const axisFmt = isPct ? (v) => (v * 100).toFixed(0) + "%" : (v) => "$" + (v / 1000).toFixed(0) + "k";
+  const periodTag = PERIOD_DEFS.find((p) => p.id === period)?.label || "";
+  const pill = (oncl, on, label, key) => (
+    <button key={key} onClick={oncl} style={{ fontSize: 11.5, fontWeight: 600, padding: "4px 9px", borderRadius: 7, cursor: "pointer", border: `1px solid ${on ? accent : C.border}`, background: on ? accent : "#fff", color: on ? "#fff" : C.sub }}>{label}</button>
+  );
+  return (
+    <Panel title={`${mDef.label} by property — ${periodTag.toLowerCase()}`}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, justifyContent: "flex-end" }}>
+        {pill(() => setShowPY((s) => !s), showPY, "Last year", "py")}
+        {pill(() => setShowPM((s) => !s), showPM, "Last month", "pm")}
+      </div>
+      {data.some((c) => c.cur) ? (
+        <ResponsiveContainer width="100%" height={260}>
+          <BarChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+            <XAxis dataKey="name" tick={{ fontSize: 12, fill: C.muted }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={axisFmt} domain={isPct ? [0, 1] : undefined} />
+            <Tooltip formatter={(v) => v == null ? "—" : (isPct ? fmtPct(v) : fmtMoney(v))} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+            {(showPY || showPM) && <Legend wrapperStyle={{ fontSize: 12 }} />}
+            <Bar dataKey="cur" radius={[6, 6, 0, 0]} name={mDef.label}>{data.map((c) => <Cell key={c.name} fill={c.color} />)}</Bar>
+            {showPY && <Bar dataKey="prevYear" fill="#c9d0da" radius={[6, 6, 0, 0]} name="Last year" />}
+            {showPM && <Bar dataKey="prevMonth" fill="#b8c0cc" radius={[6, 6, 0, 0]} name="Last month" />}
+          </BarChart>
+        </ResponsiveContainer>
+      ) : <Empty text="Load data to compare properties." />}
+    </Panel>
+  );
+}
+
+function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUpload, channelTitle, regionMode }) {
+  const propIds = props.map((p) => p.id);
+  const derived = useMemo(() => props.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model, propIds.join()]);
+
+  const kpi = useMemo(() => {
+    const now = new Date();
+    let cmRev = 0, cmLY = 0, ytdRev = 0, ytdPrior = 0, nights = 0, avail = 0, adrW = 0, adrN = 0, occSum = 0, occN = 0, cmLabel = "", ytdLabel = "";
+    derived.forEach((d) => {
+      cmRev += d.currentMonth.revenue || 0; cmLY += d.currentMonth.lyRevenue || 0; ytdRev += d.ytd || 0; ytdPrior += d.ytdPrior || 0;
+      cmLabel = d.currentMonth.label; ytdLabel = `${d.ytdYear} YTD`;
+      const cm = d.currentMonth;
+      if (cm && cm.has) {
+        nights += cm.nights || 0;
+        avail += d.meta.units * daysInMonth(now.getFullYear(), now.getMonth());
+        if (cm.adr != null) { adrW += cm.adr * (cm.nights || 1); adrN += (cm.nights || 1); }
+        if (cm.occ != null) { occSum += cm.occ; occN++; }
+      }
+    });
+    const occ = avail ? Math.min(1, nights / avail) : (occN ? occSum / occN : null);
+    const adr = adrN ? adrW / adrN : null;
+    return {
+      currentMonthRevenue: cmRev, currentMonthLabel: cmLabel || "Current month",
+      currentMonthDelta: cmLY > 0 ? delta(cmRev, cmLY) : null, currentMonthLY: cmLY > 0 ? cmLY : null, currentMonthLYLabel: `${MONTHS[now.getMonth()]} ${now.getFullYear() - 1}`,
+      ytdRevenue: ytdRev, ytdLabel: ytdLabel || "YTD", ytdDelta: ytdPrior > 0 ? delta(ytdRev, ytdPrior) : null,
+      occ, adr, revpar: adr && occ ? adr * occ : null, metricLabel: cmLabel || "current month",
+      occDelta: null, adrDelta: null, revparDelta: null,
+    };
+  }, [derived]);
+
+  const compare = derived.map((d) => ({ name: d.meta.short, revenue: d.currentMonth?.revenue || 0, color: d.meta.color }));
+  const portfolioOta = useMemo(() => {
+    const totals = {};
+    derived.forEach((d) => { (d.ota || []).forEach((o) => { totals[o.name] = (totals[o.name] || 0) + o.value; }); });
+    return Object.entries(totals).map(([name, value]) => ({ name, value }));
+  }, [derived]);
+  const portfolioOtaByMonth = useMemo(() => {
+    const out = {};
+    derived.forEach((d) => { const obm = d.otaByMonth || {}; for (const mk of Object.keys(obm)) { const dst = (out[mk] = out[mk] || {}); for (const [src, v] of Object.entries(obm[mk] || {})) dst[src] = (dst[src] || 0) + v; } });
+    return out;
+  }, [derived]);
+
+  const portfolioDerived = useMemo(() => deriveCombined(propIds, model, { units: props.reduce((a, p) => a + (p.units || 0), 0), color: accent, compareMode: "yoy", name: title }), [model, propIds.join(), accent]);
+  const ctl = useMetricsState(portfolioDerived, true); // portfolio: straight YoY always available
+
+  return (
+    <div>
+      <SectionTitle sub={sub}>{title}</SectionTitle>
+      {!hasData && onUpload && (
         <div className="ui" onClick={onUpload} style={{ cursor: "pointer", border: `2px dashed ${C.borderStrong}`, borderRadius: 16, padding: "46px 24px", textAlign: "center", background: "#fafbfc", marginBottom: 22 }}>
           <Upload size={26} style={{ color: C.muted }} />
           <div style={{ fontWeight: 600, marginTop: 10, color: C.ink }}>Drop your first file to begin</div>
-          <div style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>RevPAR reports, KPI trackers, reservation exports, or a PDF/screenshot — it'll auto-route to the right property.</div>
+          <div style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>RevPAR reports, KPI trackers, channel production, pace reports, or a PDF/screenshot — name the file with the property and it auto-routes.</div>
         </div>
       )}
 
-      <KpiRow d={portfolio} accent={C.slate} />
+      <MetricsSquares d={portfolioDerived} accent={accent} ctl={ctl} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
-        <Panel title="Revenue by property — current month">
-          {compare.some((c) => c.revenue) ? (
-            <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={compare} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-                <XAxis dataKey="name" tick={{ fontSize: 12, fill: C.muted }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
-                <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
-                <Bar dataKey="revenue" radius={[6, 6, 0, 0]}>{compare.map((c) => <Cell key={c.name} fill={c.color} />)}</Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          ) : <Empty text="Load data to compare properties." />}
-        </Panel>
-        <DailyFocus model={model} />
+        <PropertyBars derived={derived} ctl={ctl} accent={accent} />
+        <Panel title={channelTitle}><OtaChart d={{ ota: portfolioOta, otaByMonth: portfolioOtaByMonth, meta: { color: accent } }} /></Panel>
       </div>
 
-      <div style={{ marginTop: 16 }}><Alerts model={model} /></div>
+      <div style={{ marginTop: 16 }}><PacePanel derived={derived} title="Pace & pickup — booked nights vs. same time last year" /></div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 16, marginTop: 16 }}>
-        {derived.map((d) => (
-          <div key={d.pid} onClick={() => goto(d.pid)} style={{ cursor: "pointer", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: 18, borderLeft: `4px solid ${d.meta.color}` }}>
-            <div className="ui" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ fontWeight: 700, color: C.ink }}>{d.meta.name}</div>
-              <ChevronRight size={16} style={{ color: C.faint }} />
-            </div>
-            <div className="ui" style={{ fontSize: 11.5, color: C.muted }}>{d.meta.location} · {d.meta.units} units · {d.latest?.label || "—"}</div>
-            <div style={{ display: "flex", gap: 16, marginTop: 12 }}>
-              <Mini label="Rev" val={fmtMoney(d.latest?.revenue)} />
-              <Mini label="Occ" val={fmtPct(d.latest?.occ)} />
-              <Mini label="ADR" val={fmtMoney(d.latest?.adr)} />
-            </div>
-          </div>
-        ))}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+        <ForecastPanel derived={derived} />
+        <Leaderboard derived={derived} />
       </div>
+
+      <div style={{ marginTop: 16 }}><ChannelOverTime derived={derived} /></div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16, marginTop: 16 }}>
+        <div><DailyFocus model={model} propIds={propIds} /></div>
+        <div style={{ display: "grid", gap: 16 }}>
+          <ActivityFeed model={model} propIds={propIds} />
+          <SlackDigest model={model} propIds={propIds} />
+        </div>
+      </div>
+      <div style={{ marginTop: 16 }}><AnnualBoard derived={derived} goto={goto} /></div>
     </div>
   );
 }
@@ -656,9 +1761,357 @@ function Mini({ label, val }) {
   return <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4 }}>{label}</div><div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontWeight: 700 }}>{val}</div></div>;
 }
 
+/* period toggle (MTD / QTD / YTD / trailing 12) with per-property drill-down */
+const PERIODS = [{ id: "mtd", label: "This month" }, { id: "qtd", label: "This quarter" }, { id: "ytd", label: "YTD" }, { id: "t12", label: "Last 12 mo" }];
+function periodRange(id) {
+  const now = new Date(); const y = now.getFullYear(); const m = now.getMonth();
+  if (id === "mtd") return (s) => s.year === y && s.mIdx === m;
+  if (id === "qtd") { const qs = Math.floor(m / 3) * 3; return (s) => s.year === y && s.mIdx >= qs && s.mIdx <= m; }
+  if (id === "ytd") return (s) => s.year === y && s.mIdx <= m;
+  const cutoff = new Date(y, m - 11, 1); return (s) => { const sd = new Date(s.year, s.mIdx, 1); return sd >= cutoff && sd <= new Date(y, m, 1); };
+}
+function PeriodBreakdown({ derived, accent }) {
+  const [period, setPeriod] = useState("mtd");
+  const [open, setOpen] = useState(false);
+  const inRange = periodRange(period);
+  const rows = derived.map((d) => ({ name: d.meta.short, color: d.meta.color, rev: d.series.filter(inRange).reduce((a, s) => a + (s.revenue || 0), 0) }))
+    .filter((r) => r.rev > 0).sort((a, b) => b.rev - a.rev);
+  const total = rows.reduce((a, r) => a + r.rev, 0);
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 18px", marginTop: 16 }}>
+      <div className="ui" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        {PERIODS.map((p) => (
+          <button key={p.id} onClick={() => setPeriod(p.id)} style={{ background: period === p.id ? accent : "#fff", color: period === p.id ? "#fff" : C.sub, border: `1px solid ${period === p.id ? accent : C.border}`, borderRadius: 7, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{p.label}</button>
+        ))}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span className="ui" style={{ fontSize: 12, color: C.muted }}>Revenue</span>
+          <span style={{ fontFamily: "Georgia,serif", fontSize: 24, fontWeight: 700, color: C.ink }}>{fmtMoney(total)}</span>
+          <button className="ui" onClick={() => setOpen(!open)} style={{ background: "transparent", border: "none", color: accent, cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}>{open ? "Hide" : "Drill down"}</button>
+        </div>
+      </div>
+      {open && (
+        <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
+          {!rows.length ? <Empty text="No revenue in this period yet." /> : rows.map((r) => (
+            <div key={r.name} className="ui" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ width: 9, height: 9, borderRadius: 9, background: r.color }} />
+              <span style={{ width: 90, fontSize: 13 }}>{r.name}</span>
+              <div style={{ flex: 1, background: C.track, borderRadius: 5, height: 8 }}><div style={{ width: `${(r.rev / rows[0].rev) * 100}%`, height: "100%", borderRadius: 5, background: r.color }} /></div>
+              <span style={{ width: 90, textAlign: "right", fontSize: 13, fontWeight: 700 }}>{fmtMoney(r.rev)}</span>
+              <span style={{ width: 44, textAlign: "right", fontSize: 12, color: C.muted }}>{total ? ((r.rev / total) * 100).toFixed(0) : 0}%</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- PACE & PICKUP ---------------- */
+function PacePanel({ derived, title }) {
+  const withPace = derived.filter((d) => d.pace);
+  if (!withPace.length) return (
+    <Panel title={title}><Empty text="Pace appears when a pace/pickup report (booked nights, pickup, booking window) is loaded." /></Panel>
+  );
+  const tot = withPace.reduce((a, d) => ({
+    bn: a.bn + d.pace.bookedNights, stly: a.stly + d.pace.bookedNightsSTLY,
+    p7: a.p7 + d.pace.pickup7, p30: a.p30 + d.pace.pickup30,
+    bw: a.bw + (d.pace.bookingWindow || 0), bwN: a.bwN + (d.pace.bookingWindow != null ? 1 : 0),
+  }), { bn: 0, stly: 0, p7: 0, p30: 0, bw: 0, bwN: 0 });
+  const vsStly = tot.stly ? (tot.bn - tot.stly) / tot.stly : null;
+  const chart = withPace.map((d) => ({ name: d.meta.short, "This year": d.pace.bookedNights, "Last year (STLY)": d.pace.bookedNightsSTLY, color: d.meta.color }));
+  return (
+    <Panel title={title}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 14 }}>
+        <PaceStat label="Booked nights" value={tot.bn} sub={vsStly != null ? `${vsStly >= 0 ? "+" : ""}${(vsStly * 100).toFixed(0)}% vs last year` : null} good={vsStly >= 0} />
+        <PaceStat label="Pickup last 7 days" value={tot.p7} sub="net new booked nights" />
+        <PaceStat label="Pickup last 30 days" value={tot.p30} sub="net new booked nights" />
+        <PaceStat label="Avg booking window" value={tot.bwN ? Math.round(tot.bw / tot.bwN) : "—"} sub="days out" raw />
+      </div>
+      <ResponsiveContainer width="100%" height={220}>
+        <BarChart data={chart} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+          <XAxis dataKey="name" tick={{ fontSize: 12, fill: C.muted }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <Tooltip contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          <Bar dataKey="Last year (STLY)" fill="#c9d0da" radius={[4, 4, 0, 0]} />
+          <Bar dataKey="This year" fill={C.slate} radius={[4, 4, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </Panel>
+  );
+}
+function PaceStat({ label, value, sub, good, raw }) {
+  return (
+    <div style={{ background: "#f8f9fb", border: `1px solid ${C.track}`, borderRadius: 11, padding: "12px 14px" }}>
+      <div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>{label}</div>
+      <div style={{ fontFamily: "Georgia,serif", fontSize: 23, fontWeight: 700, marginTop: 5 }}>{raw ? value : (typeof value === "number" ? value.toLocaleString() : value)}</div>
+      {sub && <div className="ui" style={{ fontSize: 11.5, marginTop: 2, color: good == null ? C.muted : good ? C.good : C.bad }}>{sub}</div>}
+    </div>
+  );
+}
+
+/* ---------------- FORECAST ---------------- */
+function ForecastPanel({ derived }) {
+  const agg = derived.reduce((a, d) => {
+    a.onBooks += d.forecast?.onBooks || 0; a.proj += d.forecast?.projection || 0;
+    a.goal += d.goal || 0; a.frac = d.forecast?.fracElapsed ?? a.frac; a.label = d.currentMonth?.label || a.label;
+    return a;
+  }, { onBooks: 0, proj: 0, goal: 0, frac: 0, label: "" });
+  const toGoal = agg.goal ? agg.proj / agg.goal : null;
+  return (
+    <Panel title="Month-end forecast (run-rate)">
+      <div className="ui" style={{ fontSize: 12.5, color: C.muted, marginBottom: 10 }}>{agg.label} · {(agg.frac * 100).toFixed(0)}% of month elapsed</div>
+      <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
+        <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>On the books</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700 }}>{fmtMoney(agg.onBooks)}</div></div>
+        <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>Projected month-end</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700, color: "#14274d" }}>{fmtMoney(agg.proj)}</div></div>
+        {agg.goal > 0 && <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>vs Goal</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700, color: toGoal >= 1 ? C.good : C.bad }}>{fmtPct(toGoal)}</div></div>}
+      </div>
+      <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 10 }}>Projection blends on-the-books with run-rate; most accurate once the month is underway and with daily pacing data.</div>
+    </Panel>
+  );
+}
+
+/* ---------------- LEADERBOARD ---------------- */
+function Leaderboard({ derived }) {
+  const [metric, setMetric] = useState("revpar");
+  const rows = derived.map((d) => {
+    const py = d.priorY != null ? d.yoy.find((y) => y.month === d.latest?.monthName)?.[d.priorY] : null;
+    const yoy = py ? delta(d.latest?.revenue, py) : null;
+    const goalAtt = d.goal ? (d.currentMonth?.revenue || 0) / d.goal : null;
+    return { name: d.meta.short, color: d.meta.color, revpar: d.latest?.revpar ?? null, yoy, goal: goalAtt };
+  }).filter((r) => r[metric] != null).sort((a, b) => (b[metric] || -1) - (a[metric] || -1));
+  const fmt = (v) => metric === "revpar" ? fmtMoney(v) : fmtPct(v);
+  const max = Math.max(...rows.map((r) => Math.abs(r[metric] || 0)), 1);
+  return (
+    <Panel title="Leaderboard" right={
+      <select value={metric} onChange={(e) => setMetric(e.target.value)} className="ui" style={{ fontSize: 12, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}` }}>
+        <option value="revpar">RevPAR</option><option value="yoy">YoY growth</option><option value="goal">Goal attainment</option>
+      </select>}>
+      {!rows.length ? <Empty text="Load data to rank properties." /> : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {rows.map((r, i) => (
+            <div key={r.name} className="ui" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ width: 18, fontWeight: 700, color: C.faint, fontSize: 13 }}>{i + 1}</span>
+              <span style={{ width: 9, height: 9, borderRadius: 9, background: r.color }} />
+              <span style={{ width: 86, fontSize: 13, fontWeight: 600 }}>{r.name}</span>
+              <div style={{ flex: 1, background: C.track, borderRadius: 5, height: 8 }}>
+                <div style={{ width: `${Math.max(3, (Math.abs(r[metric] || 0) / max) * 100)}%`, height: "100%", borderRadius: 5, background: r.color }} />
+              </div>
+              <span style={{ width: 64, textAlign: "right", fontSize: 13, fontWeight: 700 }}>{fmt(r[metric])}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/* ---------------- CHANNEL OVER TIME + NET-OF-FEE ---------------- */
+function ChannelOverTime({ derived }) {
+  const [net, setNet] = useState(false);
+  const monthly = {};
+  derived.forEach((d) => {
+    Object.entries(d.otaByMonth || {}).forEach(([m, chans]) => {
+      const row = (monthly[m] = monthly[m] || {});
+      Object.entries(chans).forEach(([c, v]) => { row[c] = (row[c] || 0) + (net ? v * (1 - (CHANNEL_FEES[c] ?? 0.12)) : v); });
+    });
+  });
+  const months = Object.keys(monthly).sort();
+  const data = months.map((m) => { const [y, mo] = m.split("-").map(Number); return { label: `${MONTHS[mo - 1]} '${String(y).slice(2)}`, ...monthly[m] }; });
+  const present = STANDARD_CHANNELS.filter((c) => data.some((d) => d[c]));
+  return (
+    <Panel title="Channel contribution over time" right={
+      <button className="ui" onClick={() => setNet(!net)} style={{ fontSize: 12, padding: "5px 11px", borderRadius: 7, border: `1px solid ${C.border}`, background: net ? "#14274d" : "#fff", color: net ? "#fff" : C.sub, cursor: "pointer", fontWeight: 600 }}>
+        {net ? "Net of fees" : "Gross"}
+      </button>}>
+      {!data.length ? <Empty text="Load channel-level data (your Channel Production export) to see this." /> : (
+        <ResponsiveContainer width="100%" height={250}>
+          <AreaChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+            <XAxis dataKey="label" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
+            <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            {present.map((c) => <Area key={c} type="monotone" dataKey={c} stackId="1" stroke={OTA_COLORS[c]} fill={OTA_COLORS[c]} fillOpacity={0.55} />)}
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+      {net && <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 8 }}>Net applies assumed commissions: Airbnb 15%, Booking.com 15%, Expedia 17%, Vrbo 8%, Direct 0%.</div>}
+    </Panel>
+  );
+}
+
+/* ---------------- HEALTH SCORES ---------------- */
+function HealthBoard({ derived, goto }) {
+  const scored = derived.map((d) => ({ d, h: healthScore(d) })).filter((x) => x.h).sort((a, b) => a.h.score - b.h.score);
+  const ring = (score, color) => {
+    const c = score >= 70 ? C.good : score >= 45 ? "#b7791f" : C.bad;
+    return (
+      <svg width="54" height="54" viewBox="0 0 54 54">
+        <circle cx="27" cy="27" r="22" fill="none" stroke={C.track} strokeWidth="6" />
+        <circle cx="27" cy="27" r="22" fill="none" stroke={c} strokeWidth="6" strokeDasharray={`${(score / 100) * 138} 138`} strokeLinecap="round" transform="rotate(-90 27 27)" />
+        <text x="27" y="32" textAnchor="middle" fontSize="15" fontWeight="700" fill={C.ink} fontFamily="Georgia,serif">{score}</text>
+      </svg>
+    );
+  };
+  return (
+    <Panel title="Property health — composite score (occupancy · goal · YoY · pace)">
+      {!scored.length ? <Empty text="Load data to score properties." /> : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(190px,1fr))", gap: 12 }}>
+          {scored.map(({ d, h }) => (
+            <div key={d.pid} onClick={() => goto && goto(d.pid)} className="ui" style={{ cursor: goto ? "pointer" : "default", display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 11, background: "#f8f9fb", border: `1px solid ${C.track}`, borderLeft: `4px solid ${d.meta.color}` }}>
+              {ring(h.score, d.meta.color)}
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 13.5 }}>{d.meta.short}</div>
+                <div style={{ fontSize: 11, color: C.muted }}>{h.score >= 70 ? "Healthy" : h.score >= 45 ? "Watch" : "Needs attention"}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/* ---------------- ACTIVITY FEED ---------------- */
+function ActivityFeed({ model, propIds }) {
+  const items = (model.activity || []).filter((a) => !propIds || !a.pid || propIds.includes(a.pid)).slice(0, 12);
+  return (
+    <Panel title="Recent activity">
+      {!items.length ? <Empty text="Changes show here after each upload." /> : (
+        <div style={{ display: "grid", gap: 9 }}>
+          {items.map((a, i) => (
+            <div key={i} className="ui" style={{ display: "flex", gap: 9, fontSize: 12.5, color: C.sub, borderBottom: `1px solid ${C.track}`, paddingBottom: 8 }}>
+              <Activity size={14} style={{ color: a.pid ? PROP_BY_ID[a.pid]?.color : C.faint, flexShrink: 0, marginTop: 2 }} />
+              <div><div>{a.text}</div><div style={{ fontSize: 10.5, color: C.faint }}>{new Date(a.ts).toLocaleString()}</div></div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/* ---------------- GOAL TRACKER ---------------- */
+function GoalTracker({ d, model, setModel }) {
+  const goal = d.goal || 0;
+  const rev = d.currentMonth?.revenue || 0;
+  const pct = goal ? rev / goal : null;
+  const frac = d.forecast?.fracElapsed || 0;
+  const onTrack = pct != null ? pct >= frac : null;
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(goal);
+  const save = () => { const n = Number(val) || 0; setModel((m) => ({ ...m, goals: { ...(m.goals || {}), [d.pid]: n } })); setEditing(false); };
+  return (
+    <Panel title={`Monthly goal — ${d.currentMonth?.label || ""}`} right={
+      editing
+        ? <span className="ui" style={{ display: "flex", gap: 6 }}><input value={val} onChange={(e) => setVal(e.target.value)} style={{ width: 90, fontSize: 12, padding: "4px 7px", borderRadius: 6, border: `1px solid ${C.border}` }} /><button onClick={save} style={{ ...btnSm, padding: "5px 10px" }}>Save</button></span>
+        : <button className="ui" onClick={() => { setVal(goal); setEditing(true); }} style={{ fontSize: 12, padding: "5px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.sub, cursor: "pointer" }}>Edit goal</button>
+    }>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <div style={{ fontFamily: "Georgia,serif", fontSize: 30, fontWeight: 700, color: d.meta.color }}>{fmtMoney(rev)}</div>
+        <div className="ui" style={{ color: C.muted, fontSize: 14 }}>of {fmtMoney(goal)} goal</div>
+        {pct != null && <div className="ui" style={{ marginLeft: "auto", fontWeight: 700, fontSize: 18, color: pct >= 1 ? C.good : C.ink }}>{fmtPct(pct)}</div>}
+      </div>
+      <div style={{ background: C.track, borderRadius: 8, height: 14, marginTop: 12, position: "relative", overflow: "hidden" }}>
+        <div style={{ width: `${Math.min(100, (pct || 0) * 100)}%`, height: "100%", background: d.meta.color, borderRadius: 8 }} />
+        <div title="Today's pace marker" style={{ position: "absolute", left: `${Math.min(100, frac * 100)}%`, top: -3, bottom: -3, width: 2, background: C.ink }} />
+      </div>
+      {onTrack != null && (
+        <div className="ui" style={{ marginTop: 10, fontSize: 13, fontWeight: 600, color: onTrack ? C.good : C.bad }}>
+          {onTrack ? "On pace" : "Behind pace"} — {fmtPct(pct)} of goal with {(frac * 100).toFixed(0)}% of the month elapsed
+          {!onTrack && goal ? `. Need ${fmtMoney(goal - rev)} more.` : "."}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+
 /* ---------------- PROPERTY PAGE ---------------- */
-function PropertyPage({ pid, model }) {
+/* ---------------- ANNUAL REPORT SUMMARY (from listing-level annual export) ---------------- */
+function annualFromSnap(s) {
+  if (!s || !s.revenue) return null;
+  return {
+    year: s.year,
+    revenue: s.revenue,
+    revenueLY: s.revenueLY || 0,
+    occ: s.occN ? s.occSum / s.occN : null,
+    adr: s.adrN ? s.adrSum / s.adrN : null,
+    revpar: s.revparN ? s.revparSum / s.revparN : null,
+    yoy: s.revenueLY > 0 ? (s.revenue - s.revenueLY) / s.revenueLY : null,
+  };
+}
+function AnnualSummary({ d }) {
+  const a = annualFromSnap(d.snap);
+  if (!a) return null;
+  return (
+    <Panel title={`Annual report — ${a.year}`} right={a.yoy != null ? <span className="ui" style={{ fontSize: 13, fontWeight: 700, color: a.yoy >= 0 ? C.good : C.bad, display: "flex", alignItems: "center", gap: 4 }}>{a.yoy >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />}{(a.yoy * 100).toFixed(1)}% YoY</span> : null}>
+      <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+        <Mini label={`Revenue ${a.year}`} val={fmtMoney(a.revenue)} />
+        <Mini label={`Revenue ${a.year - 1}`} val={a.revenueLY ? fmtMoney(a.revenueLY) : "—"} />
+        <Mini label="Occupancy" val={a.occ != null ? fmtPct(a.occ) : "—"} />
+        <Mini label="ADR" val={a.adr != null ? fmtMoney(a.adr) : "—"} />
+        <Mini label="RevPAR" val={a.revpar != null ? fmtMoney(a.revpar) : "—"} />
+      </div>
+      <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 12 }}>From the uploaded annual report. This covers the report's full annual window and is tracked separately from the month-by-month figures above; occupancy, ADR and RevPAR are averaged across this property's listings.</div>
+    </Panel>
+  );
+}
+function AnnualBoard({ derived, goto }) {
+  const rows = derived.map((d) => ({ d, a: annualFromSnap(d.snap) })).filter((r) => r.a);
+  if (!rows.length) return null;
+  rows.sort((x, y) => y.a.revenue - x.a.revenue);
+  const year = rows[0].a.year;
+  const tot = rows.reduce((s, r) => s + r.a.revenue, 0);
+  const totLY = rows.reduce((s, r) => s + (r.a.revenueLY || 0), 0);
+  const totYoY = totLY > 0 ? (tot - totLY) / totLY : null;
+  return (
+    <Panel title={`Annual report summary — ${year}`}>
+      <div style={{ overflowX: "auto" }}>
+        <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, whiteSpace: "nowrap" }}>
+          <thead>
+            <tr style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .3, textAlign: "right" }}>
+              <th style={{ padding: "7px 9px", textAlign: "left", borderBottom: `2px solid ${C.border}` }}>Property</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Revenue {year}</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Revenue {year - 1}</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>YoY</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Occ</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>ADR</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>RevPAR</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ d, a }) => (
+              <tr key={d.pid} onClick={() => goto && goto(d.pid)} style={{ borderBottom: `1px solid ${C.track}`, textAlign: "right", cursor: goto ? "pointer" : "default" }}>
+                <td style={{ padding: "7px 9px", textAlign: "left", fontWeight: 600 }}><span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 3, background: d.meta.color, marginRight: 7 }} />{d.meta.name}</td>
+                <td style={{ padding: "7px 9px", fontWeight: 600 }}>{fmtMoney(a.revenue)}</td>
+                <td style={{ padding: "7px 9px", color: C.muted }}>{a.revenueLY ? fmtMoney(a.revenueLY) : "—"}</td>
+                <td style={{ padding: "7px 9px", fontWeight: 600, color: a.yoy == null ? C.faint : a.yoy >= 0 ? C.good : C.bad }}>{a.yoy == null ? "—" : `${a.yoy >= 0 ? "+" : ""}${(a.yoy * 100).toFixed(0)}%`}</td>
+                <td style={{ padding: "7px 9px" }}>{a.occ != null ? fmtPct(a.occ) : "—"}</td>
+                <td style={{ padding: "7px 9px" }}>{a.adr != null ? fmtMoney(a.adr) : "—"}</td>
+                <td style={{ padding: "7px 9px" }}>{a.revpar != null ? fmtMoney(a.revpar) : "—"}</td>
+              </tr>
+            ))}
+            <tr style={{ borderTop: `2px solid ${C.border}`, textAlign: "right", fontWeight: 700 }}>
+              <td style={{ padding: "8px 9px", textAlign: "left" }}>Total</td>
+              <td style={{ padding: "8px 9px" }}>{fmtMoney(tot)}</td>
+              <td style={{ padding: "8px 9px", color: C.muted }}>{totLY ? fmtMoney(totLY) : "—"}</td>
+              <td style={{ padding: "8px 9px", color: totYoY == null ? C.faint : totYoY >= 0 ? C.good : C.bad }}>{totYoY == null ? "—" : `${totYoY >= 0 ? "+" : ""}${(totYoY * 100).toFixed(0)}%`}</td>
+              <td colSpan={3} />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 10 }}>From the uploaded annual report — its window may differ from the month-by-month roll-up, so these totals are kept separate.</div>
+    </Panel>
+  );
+}
+
+function PropertyPage({ pid, model, setModel }) {
   const d = useMemo(() => deriveProperty(pid, model), [pid, model]);
+  const ctl = useMetricsState(d, false); // YoY only if this property has a full prior year
   const meta = PROP_BY_ID[pid];
   if (!d) return (<><SectionTitle sub={`${meta.location} · ${meta.units} units`}>{meta.name}</SectionTitle><Panel title="No data"><Empty text={`Upload a file for ${meta.name} (or any combined export) to populate this page.`} /></Panel></>);
   return (
@@ -666,33 +2119,223 @@ function PropertyPage({ pid, model }) {
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
         <span style={{ width: 16, height: 16, borderRadius: 5, background: meta.color }} />
         <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>{meta.name}</h1>
-          <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{meta.location} · {meta.units} units · latest {d.latest?.label || "—"}</div></div>
+          <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{meta.location} · {unitsActive(pid, new Date().getFullYear(), new Date().getMonth(), model)} units · latest {d.latest?.label || "—"}</div></div>
       </div>
-      <KpiRow d={d} accent={meta.color} />
+      <MetricsSquares d={d} accent={meta.color} ctl={ctl} />
+      <div style={{ marginTop: 16 }}>
+        <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} — ${ctl.canYoy ? "year over year by month" : "by month"}`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
+      </div>
+      {d.snap && <div style={{ marginTop: 16 }}><AnnualSummary d={d} /></div>}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+        <GoalTracker d={d} model={model} setModel={setModel} />
+        <ForecastPanel derived={[d]} />
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
-        <Panel title="Year-over-year revenue"><YoyChart d={d} /></Panel>
+        <Panel title="Revenue trend"><TrendChart series={d.series} dataKey="revenue" color={meta.color} fmt={(v) => "$" + (v / 1000).toFixed(0) + "k"} /></Panel>
         <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
-        <Panel title="Revenue trend"><TrendChart series={d.series} dataKey="revenue" color={meta.color} fmt={(v) => "$" + (v / 1000).toFixed(0) + "k"} /></Panel>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginTop: 16 }}>
         <Panel title="Occupancy trend"><TrendChart series={d.series} dataKey="occ" color={meta.color} fmt={(v) => (v * 100).toFixed(0) + "%"} /></Panel>
         <Panel title="ADR trend"><TrendChart series={d.series} dataKey="adr" color={meta.color} fmt={(v) => "$" + v.toFixed(0)} /></Panel>
         <Panel title="RevPAR trend"><TrendChart series={d.series} dataKey="revpar" color={meta.color} fmt={(v) => "$" + v.toFixed(0)} /></Panel>
       </div>
+      <div style={{ marginTop: 16 }}><HealthBoard derived={[d]} goto={() => {}} title="Property health" /></div>
+      <div style={{ marginTop: 16 }}><PickupPanel d={d} /></div>
+      <div style={{ marginTop: 16 }}><StayPatternsPanel d={d} /></div>
+      <div style={{ marginTop: 16 }}><ChannelProfitPanel d={d} /></div>
+      <div style={{ marginTop: 16 }}><BudgetPanel d={d} model={model} setModel={setModel} canEdit={true} /></div>
+      <div style={{ marginTop: 16 }}><ChannelOverTime derived={[d]} /></div>
+      {deriveAds(model, pid) && <div style={{ marginTop: 16 }}><AdPanel ads={deriveAds(model, pid)} color={meta.color} /></div>}
+      <div style={{ marginTop: 16 }}><YoyReport d={d} /></div>
       <div style={{ marginTop: 16 }}><PropertyAdvisor d={d} /></div>
     </div>
   );
 }
 
+function KhorramiPage({ model, setModel }) {
+  const [scope, setScope] = useState("all");
+  const members = KHORRAMI.members;
+  const d = useMemo(() => {
+    if (scope === "all") return deriveCombined(members, model, { ...KHORRAMI });
+    return deriveProperty(scope, model);
+  }, [scope, model]);
+  const ctl = useMetricsState(d, false);
+  const meta = scope === "all" ? KHORRAMI : PROP_BY_ID[scope];
+  const scopes = [{ id: "all", name: "All (combined)" }, { id: "woodbrook", name: "Woodbrook" }, { id: "rogers", name: "Rogers" }];
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+        <span style={{ width: 16, height: 16, borderRadius: 5, background: KHORRAMI.color }} />
+        <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>Khorrami</h1>
+          <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{KHORRAMI.location} · Woodbrook + Rogers · {KHORRAMI.units} units combined</div></div>
+      </div>
+      <div style={{ display: "flex", gap: 7, marginBottom: 16 }}>
+        {scopes.map((s) => (
+          <button key={s.id} onClick={() => setScope(s.id)} style={{ fontSize: 12.5, fontWeight: 600, padding: "6px 13px", borderRadius: 8, cursor: "pointer", border: `1px solid ${scope === s.id ? meta.color : C.border}`, background: scope === s.id ? meta.color : "#fff", color: scope === s.id ? "#fff" : C.sub }}>{s.name}</button>
+        ))}
+      </div>
+      {!d ? <Panel title="No data"><Empty text="Upload Woodbrook or Rogers data to populate this page." /></Panel> : (
+        <>
+          <MetricsSquares d={d} accent={meta.color} ctl={ctl} />
+          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
+            <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} by month`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
+            <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
+          </div>
+          <div style={{ marginTop: 16 }}><HealthBoard derived={[d]} goto={() => {}} title="Property health" /></div>
+          <div style={{ marginTop: 16 }}><YoyReport d={d} /></div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- HISTORICAL MONTHLY REPORT (YoY) ---------------- */
+function YoyReport({ d }) {
+  const cur = d.curY, prior = d.priorY;
+  if (cur == null) return null;
+  const pctd = (x, y) => (x != null && y != null && y !== 0) ? (x - y) / y : null;
+  const monthRows = MONTHS.map((mn, i) => ({ mn, a: d.byYear[cur]?.[i] || null, b: prior != null ? (d.byYear[prior]?.[i] || null) : null })).filter((r) => r.a || r.b);
+  if (!monthRows.length) return null;
+  const totA = monthRows.reduce((s, r) => s + (r.a?.revenue || 0), 0);
+  const totB = monthRows.reduce((s, r) => s + (r.b?.revenue || 0), 0);
+  const dCell = (x, y) => { const p = pctd(x, y); return p == null ? <span style={{ color: C.faint }}>—</span> : <span style={{ color: p >= 0 ? C.good : C.bad, fontWeight: 600 }}>{p >= 0 ? "+" : ""}{(p * 100).toFixed(0)}%</span>; };
+  const m$ = (v) => v != null ? fmtMoney(v) : "—";
+  const pc = (v) => v != null ? fmtPct(v) : "—";
+  return (
+    <Panel title="Historical monthly report — year over year" right={prior != null ? <span className="ui" style={{ fontSize: 12.5, color: C.muted }}>{cur} vs {prior}</span> : null}>
+      {prior == null && <div className="ui" style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>No prior-year data on file yet, so this shows {cur} actuals. Once a file with last-year columns is uploaded, the comparison fills in automatically.</div>}
+      <div style={{ overflowX: "auto" }}>
+        <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, whiteSpace: "nowrap" }}>
+          <thead>
+            <tr style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .3, textAlign: "right" }}>
+              <th style={{ padding: "7px 9px", textAlign: "left", borderBottom: `2px solid ${C.border}` }}>Month</th>
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Rev {cur}</th>
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Rev {prior}</th>}
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Δ</th>}
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Occ {cur}</th>
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Occ {prior}</th>}
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>ADR {cur}</th>
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>ADR {prior}</th>}
+              <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>RevPAR {cur}</th>
+              {prior != null && <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>RevPAR {prior}</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {monthRows.map((r) => (
+              <tr key={r.mn} style={{ borderBottom: `1px solid ${C.track}`, textAlign: "right" }}>
+                <td style={{ padding: "6px 9px", textAlign: "left", fontWeight: 600 }}>{r.mn}</td>
+                <td style={{ padding: "6px 9px" }}>{m$(r.a?.revenue)}</td>
+                {prior != null && <td style={{ padding: "6px 9px", color: C.muted }}>{m$(r.b?.revenue)}</td>}
+                {prior != null && <td style={{ padding: "6px 9px" }}>{dCell(r.a?.revenue, r.b?.revenue)}</td>}
+                <td style={{ padding: "6px 9px" }}>{pc(r.a?.occ)}</td>
+                {prior != null && <td style={{ padding: "6px 9px", color: C.muted }}>{pc(r.b?.occ)}</td>}
+                <td style={{ padding: "6px 9px" }}>{m$(r.a?.adr)}</td>
+                {prior != null && <td style={{ padding: "6px 9px", color: C.muted }}>{m$(r.b?.adr)}</td>}
+                <td style={{ padding: "6px 9px" }}>{m$(r.a?.revpar)}</td>
+                {prior != null && <td style={{ padding: "6px 9px", color: C.muted }}>{m$(r.b?.revpar)}</td>}
+              </tr>
+            ))}
+            <tr style={{ borderTop: `2px solid ${C.border}`, textAlign: "right", fontWeight: 700 }}>
+              <td style={{ padding: "8px 9px", textAlign: "left" }}>Total</td>
+              <td style={{ padding: "8px 9px" }}>{fmtMoney(totA)}</td>
+              {prior != null && <td style={{ padding: "8px 9px", color: C.muted }}>{fmtMoney(totB)}</td>}
+              {prior != null && <td style={{ padding: "8px 9px" }}>{dCell(totA, totB)}</td>}
+              <td colSpan={prior != null ? 6 : 3} />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+
+/* ---------------- AD PERFORMANCE ---------------- */
+const roasColor = (r) => r == null ? "#94a3b8" : r < 2 ? "#c0392b" : r < 8 ? "#b7791f" : "#1f7a4d";
+function AdPanel({ ads, color }) {
+  const b = ads.blended;
+  return (
+    <Panel title="Ad performance — Expedia & Booking.com" right={b.roas != null ? <span className="ui" style={{ fontSize: 13, fontWeight: 700, color: roasColor(b.roas) }}>{b.roas.toFixed(1)}:1 blended ROAS</span> : null}>
+      <div style={{ display: "flex", gap: 22, marginBottom: 14, flexWrap: "wrap" }}>
+        <Mini label="Total ad spend" val={fmtMoney(b.spend)} />
+        <Mini label="Ad-attributed revenue" val={fmtMoney(b.revenue)} />
+        <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4 }}>Blended ROAS</div><div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontWeight: 700, color: roasColor(b.roas) }}>{b.roas != null ? `${b.roas.toFixed(1)}:1` : "—"}</div></div>
+      </div>
+      {ads.channels.map((c) => (
+        <div key={c.channel} style={{ marginBottom: 16 }}>
+          <div className="ui" style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, color: C.ink, fontSize: 13.5, marginBottom: 6 }}>
+            <span style={{ width: 9, height: 9, borderRadius: 3, background: OTA_COLORS[c.channel] || OTA_COLORS.Other }} />{c.channel}
+            <span style={{ marginLeft: "auto", fontSize: 12.5, color: roasColor(c.total.roas), fontWeight: 700 }}>{c.total.roas != null ? `${c.total.roas.toFixed(1)}:1` : "—"}</span>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, whiteSpace: "nowrap" }}>
+              <thead>
+                <tr style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .3, textAlign: "right" }}>
+                  <th style={{ padding: "6px 9px", textAlign: "left", borderBottom: `2px solid ${C.border}` }}>Month</th>
+                  <th style={{ padding: "6px 9px", borderBottom: `2px solid ${C.border}` }}>Spend</th>
+                  <th style={{ padding: "6px 9px", borderBottom: `2px solid ${C.border}` }}>Revenue</th>
+                  <th style={{ padding: "6px 9px", borderBottom: `2px solid ${C.border}` }}>Bookings</th>
+                  <th style={{ padding: "6px 9px", borderBottom: `2px solid ${C.border}` }}>ROAS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {c.months.map((m) => (
+                  <tr key={m.key} style={{ borderBottom: `1px solid ${C.track}`, textAlign: "right" }}>
+                    <td style={{ padding: "6px 9px", textAlign: "left", fontWeight: 600 }}>{m.label}</td>
+                    <td style={{ padding: "6px 9px" }}>{fmtMoney(m.spend)}</td>
+                    <td style={{ padding: "6px 9px" }}>{fmtMoney(m.revenue)}</td>
+                    <td style={{ padding: "6px 9px", color: C.muted }}>{m.bookings || 0}</td>
+                    <td style={{ padding: "6px 9px", fontWeight: 700, color: roasColor(m.roas) }}>{m.roas != null ? `${m.roas.toFixed(1)}:1` : "—"}</td>
+                  </tr>
+                ))}
+                <tr style={{ borderTop: `2px solid ${C.border}`, textAlign: "right", fontWeight: 700 }}>
+                  <td style={{ padding: "7px 9px", textAlign: "left" }}>Total</td>
+                  <td style={{ padding: "7px 9px" }}>{fmtMoney(c.total.spend)}</td>
+                  <td style={{ padding: "7px 9px" }}>{fmtMoney(c.total.revenue)}</td>
+                  <td style={{ padding: "7px 9px", color: C.muted }}>{c.total.bookings || 0}</td>
+                  <td style={{ padding: "7px 9px", color: roasColor(c.total.roas) }}>{c.total.roas != null ? `${c.total.roas.toFixed(1)}:1` : "—"}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
+      <div className="ui" style={{ fontSize: 11.5, color: C.muted, display: "flex", gap: 14, flexWrap: "wrap", marginTop: 2 }}>
+        <span><span style={{ color: roasColor(1) }}>●</span> below 2:1 break-even</span>
+        <span><span style={{ color: roasColor(4) }}>●</span> 2–8:1 (above break-even, below 8:1 floor)</span>
+        <span><span style={{ color: roasColor(10) }}>●</span> 8:1+ (target 10–12:1)</span>
+      </div>
+    </Panel>
+  );
+}
+function AdPage({ model }) {
+  const withAds = PROPERTIES.filter((p) => model.ads && model.ads[p.id] && Object.keys(model.ads[p.id]).length);
+  return (
+    <div>
+      <SectionTitle sub="Expedia TravelAds & Booking.com ad spend, revenue, and ROAS by property">Ad Performance</SectionTitle>
+      {!withAds.length ? (
+        <Panel title="No ad data yet"><Empty text="Upload an Expedia TravelAds report (daily) or a Booking.com campaign report (name the file with the month, e.g. Bookingcom_SOMA_2026-06.csv). Property and channel are detected automatically." /></Panel>
+      ) : withAds.map((p) => (
+        <div key={p.id} style={{ marginBottom: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "4px 0 10px" }}>
+            <span style={{ width: 13, height: 13, borderRadius: 4, background: p.color }} />
+            <span style={{ fontFamily: "Georgia,serif", fontSize: 20, fontWeight: 700 }}>{p.name}</span>
+          </div>
+          <AdPanel ads={deriveAds(model, p.id)} color={p.color} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ---------------- DAILY FOCUS ---------------- */
-function DailyFocus({ model }) {
+function DailyFocus({ model, propIds }) {
   const [txt, setTxt] = useState(null); const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
   const run = async () => {
     setBusy(true); setErr(null);
     try {
       const out = await callClaude({
         system: "You are the revenue strategist inside Christian's SHP hotel/STR dashboard. Be concrete and operational. Prioritize pricing moves and revenue generation, and reducing OTA dependency in favor of direct bookings. No fluff.",
-        messages: [{ role: "user", content: `Today is ${new Date().toDateString()}. Here is the current portfolio data:\n\n${snapshotForAI(model)}\n\nGive me TODAY'S FOCUS: the 3 highest-leverage actions to take right now to drive revenue — naming specific properties and whether it's a pricing move, an occupancy push, or an OTA→direct play. Keep each to one tight sentence. Format as 3 numbered lines.` }],
+        messages: [{ role: "user", content: `Today is ${new Date().toDateString()}. Here is the current portfolio data:\n\n${snapshotForAI(model, propIds)}\n\nGive me TODAY'S FOCUS: the 3 highest-leverage actions to take right now to drive revenue — naming specific properties and whether it's a pricing move, an occupancy push, or an OTA→direct play. Keep each to one tight sentence. Format as 3 numbered lines.` }],
         max_tokens: 600,
       });
       setTxt(out);
@@ -709,19 +2352,21 @@ function DailyFocus({ model }) {
 }
 
 /* ---------------- ALERTS ---------------- */
-function Alerts({ model }) {
-  const alerts = useMemo(() => {
-    const out = [];
-    PROPERTIES.forEach((p) => {
-      const d = deriveProperty(p.id, model); if (!d || !d.latest) return;
-      const L = d.latest;
-      if (L.occ != null && L.occ < 0.45) out.push({ sev: L.occ < 0.25 ? "high" : "med", prop: p, kind: "Low occupancy", detail: `${fmtPct(L.occ)} in ${L.label} — below 45% target.` });
-      if (d.prev && L.occ != null && d.prev.occ != null) { const dd = delta(L.occ, d.prev.occ); if (dd != null && dd < -0.15) out.push({ sev: "med", prop: p, kind: "Occupancy dropping", detail: `down ${(dd * 100).toFixed(0)}% MoM.` }); }
-      if (d.prev && L.adr != null && d.prev.adr != null) { const dd = delta(L.adr, d.prev.adr); if (dd != null && dd < -0.12) out.push({ sev: "med", prop: p, kind: "Rate softening", detail: `ADR down ${(dd * 100).toFixed(0)}% MoM to ${fmtMoney(L.adr)}.` }); }
-      if (d.priorY != null) { const py = d.yoy.find((y) => y.month === L.monthName)?.[d.priorY]; const dd = delta(L.revenue, py); if (dd != null && dd < -0.2) out.push({ sev: "high", prop: p, kind: "Revenue below last year", detail: `${L.monthName} rev down ${(dd * 100).toFixed(0)}% YoY.` }); }
-    });
-    return out.sort((a, b) => (a.sev === "high" ? -1 : 1));
-  }, [model]);
+function buildAlerts(model, propIds) {
+  const out = [];
+  const list = propIds && propIds.length ? PROPERTIES.filter((p) => propIds.includes(p.id)) : PROPERTIES;
+  list.forEach((p) => {
+    const d = deriveProperty(p.id, model); if (!d || !d.latest) return;
+    const L = d.latest;
+    if (L.occ != null && L.occ < 0.45) out.push({ sev: L.occ < 0.25 ? "high" : "med", prop: p, kind: "Low occupancy", detail: `${fmtPct(L.occ)} in ${L.label} — below 45% target.` });
+    if (d.prev && L.occ != null && d.prev.occ != null) { const dd = delta(L.occ, d.prev.occ); if (dd != null && dd < -0.15) out.push({ sev: "med", prop: p, kind: "Occupancy dropping", detail: `down ${(dd * 100).toFixed(0)}% MoM.` }); }
+    if (d.prev && L.adr != null && d.prev.adr != null) { const dd = delta(L.adr, d.prev.adr); if (dd != null && dd < -0.12) out.push({ sev: "med", prop: p, kind: "Rate softening", detail: `ADR down ${(dd * 100).toFixed(0)}% MoM to ${fmtMoney(L.adr)}.` }); }
+    if (d.priorY != null) { const py = d.yoy.find((y) => y.month === L.monthName)?.[d.priorY]; const dd = delta(L.revenue, py); if (dd != null && dd < -0.2) out.push({ sev: "high", prop: p, kind: "Revenue below last year", detail: `${L.monthName} rev down ${(dd * 100).toFixed(0)}% YoY.` }); }
+  });
+  return out.sort((a, b) => (a.sev === "high" ? -1 : 1));
+}
+function Alerts({ model, propIds }) {
+  const alerts = useMemo(() => buildAlerts(model, propIds), [model, (propIds || []).join()]);
   return (
     <Panel title="Alerts — low occupancy & rate watch">
       {!alerts.length ? <Empty text="No threshold breaches detected. Load more data to sharpen the watch." />
@@ -736,6 +2381,373 @@ function Alerts({ model }) {
           ))}
         </div>}
     </Panel>
+  );
+}
+function UnitsPage({ model, setModel, canEdit }) {
+  const roster = model.roster || DEFAULT_ROSTER;
+  const now = new Date();
+  const setRoster = (pid, next) => setModel((m) => ({ ...m, roster: { ...(m.roster || DEFAULT_ROSTER), [pid]: next } }));
+  const inp = { fontSize: 12, padding: "4px 7px", borderRadius: 6, border: `1px solid ${C.border}`, background: "#fff", color: C.ink };
+  return (
+    <div>
+      <SectionTitle sub="Occupancy = booked nights ÷ available unit-nights. This roster sets the denominator, counted day by day — so a unit that leaves mid-month counts only for the days it was live.">Units</SectionTitle>
+      {!canEdit && <div className="ui" style={{ marginBottom: 14, padding: "9px 12px", borderRadius: 9, background: "#f4f6f8", border: `1px solid ${C.border}`, fontSize: 12.5, color: C.sub }}>View-only — unlock editing to change the roster.</div>}
+      <div style={{ display: "grid", gap: 14 }}>
+        {PROPERTIES.map((p) => {
+          const r = roster[p.id] || DEFAULT_ROSTER[p.id] || { mode: "flat", flat: p.units };
+          const liveNow = unitsActive(p.id, now.getFullYear(), now.getMonth(), model);
+          return (
+            <Panel key={p.id} title={`${p.name} — ${liveNow} unit${liveNow === 1 ? "" : "s"} live now`}>
+              {r.mode === "flat" ? (
+                <div className="ui" style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13 }}>
+                  <span style={{ color: C.muted }}>Fixed unit count:</span>
+                  <input type="number" min="0" value={r.flat} disabled={!canEdit} style={{ ...inp, width: 80 }}
+                    onChange={(e) => setRoster(p.id, { ...r, flat: Number(e.target.value) || 0 })} />
+                  {canEdit && <button onClick={() => setRoster(p.id, { mode: "list", units: Array.from({ length: r.flat }, (_, i) => ({ name: `${p.short} unit ${i + 1}`, start: null, end: null })) })}
+                    style={{ ...inp, cursor: "pointer", color: C.sub }}>Switch to per-unit dates</button>}
+                </div>
+              ) : (
+                <div>
+                  <div className="ui" style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 40px", gap: 8, fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5, marginBottom: 6 }}>
+                    <span>Unit</span><span>Online from</span><span>Offline after</span><span />
+                  </div>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {(r.units || []).map((u, i) => {
+                      const upd = (patch) => { const units = [...r.units]; units[i] = { ...u, ...patch }; setRoster(p.id, { ...r, units }); };
+                      return (
+                        <div key={i} style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 40px", gap: 8, alignItems: "center" }}>
+                          <input value={u.name} disabled={!canEdit} style={inp} onChange={(e) => upd({ name: e.target.value })} />
+                          <input type="date" value={u.start || ""} disabled={!canEdit} style={inp} onChange={(e) => upd({ start: e.target.value || null })} />
+                          <input type="date" value={u.end || ""} disabled={!canEdit} style={inp} onChange={(e) => upd({ end: e.target.value || null })} />
+                          {canEdit && <button onClick={() => setRoster(p.id, { ...r, units: r.units.filter((_, j) => j !== i) })}
+                            style={{ ...inp, cursor: "pointer", color: C.bad, borderColor: "#f0d0d0" }}>×</button>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {canEdit && <button onClick={() => setRoster(p.id, { ...r, units: [...(r.units || []), { name: "New unit", start: null, end: null }] })}
+                    style={{ ...inp, cursor: "pointer", marginTop: 9, color: C.sub, display: "flex", alignItems: "center", gap: 6 }}><Plus size={12} /> Add unit</button>}
+                </div>
+              )}
+              <div className="ui" style={{ marginTop: 10, fontSize: 11.5, color: C.muted, borderTop: `1px solid ${C.border}`, paddingTop: 8 }}>
+                Available unit-nights: {[0, 1, 2].map((back) => {
+                  const dt = new Date(now.getFullYear(), now.getMonth() - back, 1);
+                  return `${MONTHS[dt.getMonth()]} ${dt.getFullYear()} = ${availUnitNights(p.id, dt.getFullYear(), dt.getMonth(), model)}`;
+                }).join("  ·  ")}
+              </div>
+            </Panel>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function FreshnessPage({ model }) {
+  const src = model.sources || {};
+  const rows = Object.values(src).sort((a, b) => (a.pid || "").localeCompare(b.pid || ""));
+  const now = new Date();
+  const ageDays = (iso) => Math.floor((now - new Date(iso)) / 86400000);
+  const monthLabel = (k) => { if (!k) return "—"; const [y, m] = k.split("-").map(Number); return `${MONTHS[m - 1]} ${y}`; };
+  // group by property so a stale RevPAR next to a fresh channel file is obvious
+  const byProp = {};
+  rows.forEach((r) => { (byProp[r.pid] = byProp[r.pid] || []).push(r); });
+  return (
+    <div>
+      <SectionTitle sub="When each report was last uploaded, and the newest month it covered. Reports of different ages for the same property are the usual cause of numbers that disagree.">Data freshness</SectionTitle>
+      {!rows.length ? <Panel title="No uploads recorded yet"><Empty text="Upload a report and it will be logged here." /></Panel> : (
+        <div style={{ display: "grid", gap: 12 }}>
+          {PROPERTIES.filter((p) => byProp[p.id]).map((p) => {
+            const list = byProp[p.id];
+            const months = list.map((r) => r.latestMonth).filter(Boolean);
+            const mismatch = new Set(months).size > 1;
+            return (
+              <Panel key={p.id} title={p.name}>
+                {mismatch && <div className="ui" style={{ marginBottom: 9, padding: "8px 11px", borderRadius: 9, background: "#fff7e8", border: "1px solid #f3e2bf", fontSize: 12.5, color: "#8a6520" }}>
+                  ⚠ Reports cover different periods — the older one is likely stale. Re-pull it so both cover the same date.
+                </div>}
+                <table className="ui" style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
+                  <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .5 }}>
+                    <th style={{ padding: "5px 8px" }}>Report</th><th style={{ padding: "5px 8px" }}>Covers through</th><th style={{ padding: "5px 8px" }}>Uploaded</th><th style={{ padding: "5px 8px" }}>File</th>
+                  </tr></thead>
+                  <tbody>
+                    {list.map((r, i) => {
+                      const age = ageDays(r.uploadedAt);
+                      const stale = age > 7;
+                      return (
+                        <tr key={i} style={{ borderTop: `1px solid ${C.track}` }}>
+                          <td style={{ padding: "6px 8px", fontWeight: 600 }}>{r.report}</td>
+                          <td style={{ padding: "6px 8px" }}>{monthLabel(r.latestMonth)}</td>
+                          <td style={{ padding: "6px 8px", color: stale ? C.bad : C.sub, fontWeight: stale ? 700 : 400 }}>{age === 0 ? "today" : `${age}d ago`}{stale ? " ⚠" : ""}</td>
+                          <td style={{ padding: "6px 8px", color: C.muted, fontSize: 11.5, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.file}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </Panel>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Booking window + length of stay, derived from the booking date Hostfully embeds in the Source cell.
+function StayPatternsPanel({ d }) {
+  const rs = d.resStats || {};
+  const keys = Object.keys(rs).sort();
+  if (!keys.length) return <Panel title="Booking window & length of stay"><Empty text="Needs reservation-level data (Hostfully STR export). Cloudbeds monthly exports don't carry booking dates." /></Panel>;
+  const agg = { n: 0, losSum: 0, leadSum: 0, leadN: 0, losHist: {}, leadHist: {} };
+  keys.forEach((k) => { const st = rs[k]; agg.n += st.n || 0; agg.losSum += st.losSum || 0; agg.leadSum += st.leadSum || 0; agg.leadN += st.leadN || 0;
+    Object.entries(st.losHist || {}).forEach(([b, v]) => agg.losHist[b] = (agg.losHist[b] || 0) + v);
+    Object.entries(st.leadHist || {}).forEach(([b, v]) => agg.leadHist[b] = (agg.leadHist[b] || 0) + v); });
+  const LOS_ORDER = ["1", "2", "3", "4-6", "7-13", "14+"];
+  const LEAD_ORDER = ["same day", "1-3d", "4-7d", "8-14d", "15-30d", "31-60d", "61-90d", "90d+"];
+  const losData = LOS_ORDER.filter((b) => agg.losHist[b]).map((b) => ({ name: b === "1" ? "1 night" : b + (b.includes("+") || b.includes("-") ? " nights" : " nights"), value: agg.losHist[b] }));
+  const leadData = LEAD_ORDER.filter((b) => agg.leadHist[b]).map((b) => ({ name: b, value: agg.leadHist[b] }));
+  const avgLos = agg.n ? agg.losSum / agg.n : null;
+  const avgLead = agg.leadN ? agg.leadSum / agg.leadN : null;
+  return (
+    <Panel title="Booking window & length of stay">
+      <div className="ui" style={{ display: "flex", gap: 22, marginBottom: 12, flexWrap: "wrap" }}>
+        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Avg stay</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{avgLos != null ? avgLos.toFixed(1) + " nights" : "—"}</div></div>
+        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Avg booking window</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{avgLead != null ? Math.round(avgLead) + " days" : "—"}</div></div>
+        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Bookings analysed</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{agg.n.toLocaleString()}</div></div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <div>
+          <div className="ui" style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 6 }}>How far ahead guests book</div>
+          <ResponsiveContainer width="100%" height={190}>
+            <BarChart data={leadData} margin={{ top: 4, right: 6, left: -14, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} interval={0} angle={-30} textAnchor="end" height={48} />
+              <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} />
+              <Tooltip formatter={(v) => v + " bookings"} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+              <Bar dataKey="value" fill={d.meta.color} radius={[5, 5, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div>
+          <div className="ui" style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 6 }}>Length of stay</div>
+          <ResponsiveContainer width="100%" height={190}>
+            <BarChart data={losData} margin={{ top: 4, right: 6, left: -14, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} interval={0} angle={-30} textAnchor="end" height={48} />
+              <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} />
+              <Tooltip formatter={(v) => v + " bookings"} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+              <Bar dataKey="value" fill={d.meta.color} radius={[5, 5, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+// Pickup curve: nights on the books by how far ahead they were booked, this year vs same month last year.
+function PickupPanel({ d }) {
+  const rs = d.resStats || {};
+  const now = new Date();
+  const curKey = mkey(now.getFullYear(), now.getMonth());
+  const lyKey = mkey(now.getFullYear() - 1, now.getMonth());
+  const cur = rs[curKey], ly = rs[lyKey];
+  if (!cur) return <Panel title="Pace & pickup"><Empty text="Needs reservation-level data with booking dates for the current month." /></Panel>;
+  const ORDER = ["90d+", "61-90d", "31-60d", "15-30d", "8-14d", "4-7d", "1-3d", "same day"];
+  let ca = 0, la = 0;
+  const data = ORDER.map((b) => {
+    ca += (cur.leadNights?.[b] || 0);
+    la += (ly?.leadNights?.[b] || 0);
+    return { name: b, thisYear: ca, lastYear: ly ? la : null };
+  });
+  const totalCur = ca, totalLy = la;
+  const dl = (ly && totalLy) ? (totalCur - totalLy) / totalLy : null;
+  return (
+    <Panel title={`Pace & pickup — ${MONTHS[now.getMonth()]} ${now.getFullYear()}`}>
+      <div className="ui" style={{ fontSize: 12.5, color: C.sub, marginBottom: 10 }}>
+        Nights on the books, accumulating from the earliest bookings to the latest.
+        {ly ? <> Same month last year for comparison — <b style={{ color: dl >= 0 ? C.good : C.bad }}>{dl != null ? (dl >= 0 ? "▲ " : "▼ ") + Math.abs(dl * 100).toFixed(0) + "%" : "—"}</b> vs last year.</> : " No prior-year data for this month yet."}
+      </div>
+      <ResponsiveContainer width="100%" height={230}>
+        <ComposedChart data={data} margin={{ top: 6, right: 8, left: -10, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+          <XAxis dataKey="name" tick={{ fontSize: 10.5, fill: C.muted }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <Tooltip formatter={(v) => v == null ? "—" : v + " nights"} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          {ly && <Line type="monotone" dataKey="lastYear" stroke="#b8c0cc" strokeWidth={2} dot={false} name="Last year" />}
+          <Line type="monotone" dataKey="thisYear" stroke={d.meta.color} strokeWidth={2.5} dot={{ r: 3 }} name="This year" />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </Panel>
+  );
+}
+
+// Net revenue by channel, after commission. A channel can look strong on gross and land lower on net.
+function ChannelProfitPanel({ d }) {
+  const obm = d?.otaByMonth || {};
+  const monthKeys = Object.keys(obm).filter((k) => Object.values(obm[k] || {}).some((v) => v > 0)).sort();
+  const now = new Date(); const curKey = mkey(now.getFullYear(), now.getMonth());
+  const [scope, setScope] = useState(monthKeys.includes(curKey) ? curKey : "all");
+  const accent = d?.meta?.color || C.ink;
+  const map = {};
+  if (scope === "all") { monthKeys.forEach((k) => Object.entries(obm[k] || {}).forEach(([n, v]) => map[n] = (map[n] || 0) + v)); }
+  else { Object.entries(obm[scope] || {}).forEach(([n, v]) => map[n] = (map[n] || 0) + v); }
+  const rows = Object.entries(map).filter(([, v]) => v > 0).map(([name, gross]) => {
+    const rate = CHANNEL_COST[name] != null ? CHANNEL_COST[name] : CHANNEL_COST.Other;
+    const fee = gross * rate;
+    return { name, gross, rate, fee, net: gross - fee };
+  }).sort((a, b) => b.net - a.net);
+  const totGross = rows.reduce((a, r) => a + r.gross, 0);
+  const totFee = rows.reduce((a, r) => a + r.fee, 0);
+  const totNet = totGross - totFee;
+  const blended = totGross ? totFee / totGross : 0;
+  const mLabel = (k) => { const [y, mo] = k.split("-").map(Number); return `${MONTHS[mo - 1]} ${y}`; };
+  if (!rows.length) return <Panel title="Channel profitability"><Empty text="Needs channel mix data." /></Panel>;
+  return (
+    <Panel title="Channel profitability — net of commission">
+      <div className="ui" style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <button onClick={() => setScope(monthKeys.includes(curKey) ? curKey : monthKeys[monthKeys.length - 1])} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${scope !== "all" ? accent : C.border}`, background: scope !== "all" ? accent : "#fff", color: scope !== "all" ? "#fff" : C.sub }}>By month</button>
+        <button onClick={() => setScope("all")} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${scope === "all" ? accent : C.border}`, background: scope === "all" ? accent : "#fff", color: scope === "all" ? "#fff" : C.sub }}>All time</button>
+        {scope !== "all" && <select value={scope} onChange={(e) => setScope(e.target.value)} style={{ fontSize: 12.5, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink, cursor: "pointer" }}>
+          {monthKeys.slice().reverse().map((k) => <option key={k} value={k}>{mLabel(k)}</option>)}
+        </select>}
+        <span style={{ marginLeft: "auto", fontSize: 12.5, color: C.sub }}>Blended commission <b style={{ color: C.bad }}>{(blended * 100).toFixed(1)}%</b> · lost to fees <b>{fmtMoney(totFee)}</b></span>
+      </div>
+      <table className="ui" style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .5 }}>
+          <th style={{ padding: "5px 8px" }}>Channel</th><th style={{ padding: "5px 8px", textAlign: "right" }}>Gross</th>
+          <th style={{ padding: "5px 8px", textAlign: "right" }}>Rate</th><th style={{ padding: "5px 8px", textAlign: "right" }}>Commission</th>
+          <th style={{ padding: "5px 8px", textAlign: "right" }}>Net</th><th style={{ padding: "5px 8px", textAlign: "right" }}>% of net</th>
+        </tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.name} style={{ borderTop: `1px solid ${C.track}` }}>
+              <td style={{ padding: "7px 8px", fontWeight: 600 }}><span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 9, background: OTA_COLORS[r.name] || "#94a3b8", marginRight: 7 }} />{r.name}</td>
+              <td style={{ padding: "7px 8px", textAlign: "right" }}>{fmtMoney(r.gross)}</td>
+              <td style={{ padding: "7px 8px", textAlign: "right", color: C.muted }}>{(r.rate * 100).toFixed(1)}%</td>
+              <td style={{ padding: "7px 8px", textAlign: "right", color: C.bad }}>−{fmtMoney(r.fee)}</td>
+              <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 700 }}>{fmtMoney(r.net)}</td>
+              <td style={{ padding: "7px 8px", textAlign: "right", color: C.muted }}>{totNet ? ((r.net / totNet) * 100).toFixed(0) : 0}%</td>
+            </tr>
+          ))}
+          <tr style={{ borderTop: `2px solid ${C.borderStrong}`, fontWeight: 700 }}>
+            <td style={{ padding: "8px" }}>Total</td>
+            <td style={{ padding: "8px", textAlign: "right" }}>{fmtMoney(totGross)}</td>
+            <td style={{ padding: "8px", textAlign: "right", color: C.muted }}>{(blended * 100).toFixed(1)}%</td>
+            <td style={{ padding: "8px", textAlign: "right", color: C.bad }}>−{fmtMoney(totFee)}</td>
+            <td style={{ padding: "8px", textAlign: "right" }}>{fmtMoney(totNet)}</td>
+            <td style={{ padding: "8px", textAlign: "right" }}>100%</td>
+          </tr>
+        </tbody>
+      </table>
+      <div className="ui" style={{ marginTop: 9, fontSize: 11.5, color: C.muted }}>Rates: Airbnb 15.5% · Booking.com 22% · Expedia 18% · Vrbo 8% · Direct 3% (card processing). Edit in CHANNEL_COST.</div>
+    </Panel>
+  );
+}
+
+// Budget vs actual revenue by month.
+function BudgetPanel({ d, model, setModel, canEdit }) {
+  const budgets = (model.budgets && model.budgets[d.pid]) || DEFAULT_BUDGETS[d.pid] || null;
+  const now = new Date(); const y = now.getFullYear();
+  if (!budgets) return (
+    <Panel title="Budget vs actual">
+      <Empty text={`No budget set for ${d.meta.name}. Add one to track variance.`} />
+    </Panel>
+  );
+  const keys = Object.keys(budgets).sort();
+  const data = keys.map((k) => {
+    const [yy, mm] = k.split("-").map(Number);
+    const act = d.byYear?.[yy]?.[mm - 1]?.revenue ?? null;
+    return { name: `${MONTHS[mm - 1]} '${String(yy).slice(2)}`, budget: budgets[k], actual: act, variance: act != null ? act - budgets[k] : null };
+  });
+  const withAct = data.filter((r) => r.actual != null);
+  const totB = withAct.reduce((a, r) => a + r.budget, 0), totA = withAct.reduce((a, r) => a + r.actual, 0);
+  const totVar = totB ? (totA - totB) / totB : null;
+  return (
+    <Panel title="Budget vs actual — revenue">
+      <div className="ui" style={{ display: "flex", gap: 22, marginBottom: 12, flexWrap: "wrap" }}>
+        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Actual to date</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{fmtMoney(totA)}</div></div>
+        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Budget to date</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{fmtMoney(totB)}</div></div>
+        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Variance</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700, color: totVar >= 0 ? C.good : C.bad }}>{totVar != null ? (totVar >= 0 ? "+" : "") + (totVar * 100).toFixed(1) + "%" : "—"}</div></div>
+      </div>
+      <ResponsiveContainer width="100%" height={230}>
+        <ComposedChart data={data} margin={{ top: 6, right: 8, left: -6, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+          <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
+          <Tooltip formatter={(v) => v == null ? "—" : fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          <Bar dataKey="budget" fill="#c9d0da" radius={[5, 5, 0, 0]} name="Budget" />
+          <Bar dataKey="actual" fill={d.meta.color} radius={[5, 5, 0, 0]} name="Actual" />
+        </ComposedChart>
+      </ResponsiveContainer>
+      <table className="ui" style={{ width: "100%", fontSize: 12.5, borderCollapse: "collapse", marginTop: 10 }}>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .5 }}>
+          <th style={{ padding: "4px 8px" }}>Month</th><th style={{ padding: "4px 8px", textAlign: "right" }}>Budget</th>
+          <th style={{ padding: "4px 8px", textAlign: "right" }}>Actual</th><th style={{ padding: "4px 8px", textAlign: "right" }}>Variance</th>
+        </tr></thead>
+        <tbody>{data.map((r) => (
+          <tr key={r.name} style={{ borderTop: `1px solid ${C.track}` }}>
+            <td style={{ padding: "6px 8px", fontWeight: 600 }}>{r.name}</td>
+            <td style={{ padding: "6px 8px", textAlign: "right" }}>{fmtMoney(r.budget)}</td>
+            <td style={{ padding: "6px 8px", textAlign: "right" }}>{r.actual != null ? fmtMoney(r.actual) : <span style={{ color: C.faint }}>—</span>}</td>
+            <td style={{ padding: "6px 8px", textAlign: "right", color: r.variance == null ? C.faint : r.variance >= 0 ? C.good : C.bad, fontWeight: 600 }}>{r.variance != null ? (r.variance >= 0 ? "+" : "") + fmtMoney(r.variance) : "—"}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+      <div className="ui" style={{ marginTop: 9, fontSize: 11.5, color: C.muted }}>Budget from the Outpost Fort Worth LLC P&L. Note the P&L books rental income (incl. fees) while the dashboard tracks room revenue, so expect a few % difference.</div>
+    </Panel>
+  );
+}
+
+function BackupPanel({ setModel, canEdit }) {
+  const [list, setList] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const load = async () => { setMsg("Checking…"); try { const b = await listBackups(); setList(b); setMsg(b.length ? null : "No backups found yet."); } catch (e) { setMsg("Could not reach storage: " + e.message); } };
+  const doRestore = async (id) => {
+    if (!confirm(`Restore the snapshot from ${prettyBackup(id)}?\n\nThis replaces the current shared data for everyone.`)) return;
+    setMsg("Restoring…");
+    try { const m = await restoreBackup(id); setModel(m); setMsg("Restored from " + prettyBackup(id) + "."); }
+    catch (e) { setMsg("Restore failed: " + e.message); }
+  };
+  return (
+    <Panel title="Backups & restore">
+      <div className="ui" style={{ fontSize: 12.5, color: C.sub, marginBottom: 10 }}>
+        A snapshot of the shared data is saved automatically before each change. If something goes wrong, restore the most recent good one.
+      </div>
+      <button onClick={load} disabled={!canEdit} style={{ fontSize: 12.5, fontWeight: 600, padding: "6px 12px", borderRadius: 8, cursor: canEdit ? "pointer" : "not-allowed", border: `1px solid ${C.border}`, background: "#fff", color: C.sub }}>
+        {list ? "Refresh list" : "Show available backups"}
+      </button>
+      {msg && <div className="ui" style={{ marginTop: 9, fontSize: 12.5, color: C.muted }}>{msg}</div>}
+      {list && list.length > 0 && (
+        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+          {list.map((id) => (
+            <div key={id} className="ui" style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 9, border: `1px solid ${C.border}`, background: "#fafbfc" }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>{prettyBackup(id)}</span>
+              <button onClick={() => doRestore(id)} disabled={!canEdit} style={{ marginLeft: "auto", fontSize: 12, fontWeight: 600, padding: "4px 11px", borderRadius: 7, cursor: canEdit ? "pointer" : "not-allowed", border: `1px solid ${C.border}`, background: "#fff", color: C.slate }}>Restore</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+function prettyBackup(id) {
+  const raw = String(id).replace(/^backup-/, "");
+  const iso = raw.replace(/-(\d{2})-(\d{2})-(\d{3})Z$/, ":$1:$2.$3Z");
+  const d = new Date(iso);
+  return isNaN(d) ? id : d.toLocaleString();
+}
+
+function AlertsPage({ model }) {
+  const propIds = PROPERTIES.map((p) => p.id);
+  return (
+    <div>
+      <SectionTitle sub="Threshold breaches across every property — occupancy, rate, and revenue watch">Alerts</SectionTitle>
+      <Alerts model={model} propIds={propIds} />
+    </div>
   );
 }
 
@@ -810,16 +2822,18 @@ function Events({ model, setModel, onFiles }) {
   const pull = async () => {
     setBusy(true); setErr(null);
     try {
+      const today = new Date(); const end = new Date(today.getTime() + 90 * 86400000);
       const out = await callClaude({
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        system: "You find demand-driving events for hotel revenue managers. Return ONLY JSON, no markdown.",
-        messages: [{ role: "user", content: `Find notable upcoming events (next ~90 days from ${new Date().toDateString()}) that drive lodging demand in (A) Fort Worth — TCU sports & events, Dickies Arena, Will Rogers Memorial Center, Fort Worth Convention Center; and (B) Arlington — AT&T Stadium, Globe Life Field, UTA, and Arlington Convention Center. Return JSON: {"events":[{"date":"YYYY-MM-DD","name":"...","venue":"...","market":"Fort Worth" or "Arlington","impact":"high|med|low"}]}. Sort by date.` }],
-        max_tokens: 1500,
+        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 6 }],
+        system: "You are a research assistant for a hotel revenue manager. Search the web for real, specific, dated events. Output ONLY a single JSON object — no prose, no markdown fences, no citations text.",
+        messages: [{ role: "user", content: `Search the web for notable events between ${today.toISOString().slice(0, 10)} and ${end.toISOString().slice(0, 10)} that drive hotel/short-term-rental demand in these two markets:\n(A) Fort Worth, TX — TCU sports, Dickies Arena concerts/events, Will Rogers Memorial Center, Fort Worth Convention Center, Stockyards events.\n(B) Arlington, TX — AT&T Stadium (Cowboys, concerts, FIFA World Cup 2026 matches), Globe Life Field (Texas Rangers home games), UT Arlington, Arlington Convention Center, Six Flags events.\nReturn ONLY this JSON shape and nothing else:\n{"events":[{"date":"YYYY-MM-DD","name":"...","venue":"...","market":"Fort Worth","impact":"high"}]}\nUse market exactly "Fort Worth" or "Arlington". Use impact "high" for stadium/arena-scale events, "med" for mid-size, "low" for minor. Sort by date. Include at least 8 events per market if available.` }],
+        max_tokens: 4096,
       });
-      const clean = out.replace(/```json|```/g, "").trim();
-      const m = clean.match(/\{[\s\S]*\}/); const parsed = JSON.parse(m ? m[0] : clean);
-      setModel((mod) => ({ ...mod, events: parsed.events || [], eventsSource: "ai", lastUpdated: new Date().toISOString() }));
-    } catch (e) { setErr("Couldn't pull events — try again, or upload a calendar file."); }
+      const parsed = JSON.parse(extractJson(out));
+      const events = (parsed.events || []).filter((e) => e && e.name && e.date);
+      if (!events.length) throw new Error("No events came back — try again.");
+      setModel((mod) => ({ ...mod, events, eventsSource: "ai", lastUpdated: new Date().toISOString() }));
+    } catch (e) { setErr("Couldn't pull events: " + (e.message || "unknown error") + ". You can also upload a calendar file."); }
     setBusy(false);
   };
   const onUpload = async (files) => {
@@ -875,3 +2889,516 @@ function Events({ model, setModel, onFiles }) {
 }
 
 const btnSm = { background: "#243244", color: "#fff", border: "none", borderRadius: 8, padding: "7px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 };
+
+/* ---------------- DATA AUDIT ---------------- */
+function AuditPage({ model, setModel }) {
+  const [openProp, setOpenProp] = useState(null);
+  const derived = useMemo(() => PROPERTIES.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model]);
+  const year = new Date().getFullYear();
+
+  const clearProp = (pid) => {
+    if (!window.confirm(`Delete ALL stored data for ${PROP_BY_ID[pid]?.name}? The months stay listed so you can re-upload files or type correct numbers in.`)) return;
+    setModel((m) => {
+      const next = JSON.parse(JSON.stringify(m));
+      next.properties[pid] = { monthly: {}, channelMonthly: {}, availByMonth: {}, ota: {}, otaByMonth: {}, snapshot: null, pace: null, wc: {} };
+      next.lastUpdated = new Date().toISOString();
+      return next;
+    });
+  };
+
+  const setCell = (pid, monthKey, field, raw) => {
+    setModel((m) => {
+      const next = JSON.parse(JSON.stringify(m));
+      const p = (next.properties[pid] = next.properties[pid] || { monthly: {}, ota: {}, otaByMonth: {}, snapshot: null });
+      const cur = (p.monthly[monthKey] = p.monthly[monthKey] || { revenue: 0, nights: 0 });
+      const [y, mo] = monthKey.split("-").map(Number);
+      const days = daysInMonth(y, mo - 1); const units = PROP_BY_ID[pid].units;
+      const val = raw === "" ? null : Number(String(raw).replace(/[$,%\s]/g, ""));
+      if (field === "revenue") { cur.revenue = val || 0; delete cur.adr; delete cur.revpar; }
+      if (field === "occ") { const occ = val == null ? null : (val > 1.5 ? val / 100 : val); cur.occ = occ; cur.nights = occ != null ? Math.round(occ * units * days) : 0; delete cur.adr; delete cur.revpar; }
+      next.lastUpdated = new Date().toISOString();
+      return next;
+    });
+  };
+
+  if (!derived.length) {
+    return (<><SectionTitle sub="Inspect and edit every number">Data Audit</SectionTitle><div style={{ marginBottom: 16 }}><BackupPanel setModel={setModel} canEdit={true} /></div><Panel title="No data"><Empty text="Upload data first (or just open a property below and type the numbers in)." /></Panel></>);
+  }
+
+  return (
+    <div>
+      <SectionTitle sub="Trace every KPI to its inputs — and edit any number directly">Data Audit</SectionTitle>
+      <div style={{ marginBottom: 16 }}><BackupPanel setModel={setModel} canEdit={true} /></div>
+
+      <Panel title="Edit mode" style={{ marginBottom: 16 }}>
+        <div className="ui" style={{ fontSize: 13.5, lineHeight: 1.7, color: C.sub }}>
+          Type a new <b>Revenue</b> or <b>Occupancy %</b> in any cell below and press Enter (or click away) — it saves instantly and recalculates ADR, RevPAR, goals, forecasts, and the charts everywhere. Use this to correct a wrong figure or fill in a month before presenting. ADR and RevPAR are computed for you. All 12 months of {year} are listed for each property so you can fill any gap.
+        </div>
+      </Panel>
+
+      {derived.map((d) => {
+        const isOpen = openProp === d.pid;
+        const existing = d.series.map((s) => s.key);
+        const monthKeys = [...new Set([...existing, ...Array.from({ length: 12 }, (_, i) => mkey(year, i))])].sort();
+        return (
+          <div key={d.pid} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, marginBottom: 12, borderLeft: `4px solid ${d.meta.color}`, overflow: "hidden" }}>
+            <div className="ui" onClick={() => setOpenProp(isOpen ? null : d.pid)} style={{ cursor: "pointer", padding: "14px 18px", display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ width: 11, height: 11, borderRadius: 11, background: d.meta.color }} />
+              <span style={{ fontWeight: 700, color: C.ink }}>{d.meta.name}</span>
+              <span style={{ fontSize: 12.5, color: C.muted }}>· {d.meta.units} units · {year} YTD {fmtMoney(d.ytd)}</span>
+              <ChevronRight size={17} style={{ marginLeft: "auto", color: C.faint, transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
+            </div>
+            {isOpen && (
+              <div style={{ padding: "0 18px 18px" }}>
+                <div className="ui" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+                  <button onClick={() => clearProp(d.pid)} style={{ fontSize: 12, padding: "6px 12px", borderRadius: 7, border: "1px solid #f2cccc", background: "#fdf3f3", color: C.bad, cursor: "pointer", fontWeight: 600 }}>
+                    Clear all data for this property
+                  </button>
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: .4 }}>
+                        {["Month", "Revenue (edit)", "Occupancy % (edit)", "Nights", "ADR", "RevPAR"].map((h) => (
+                          <th key={h} style={{ padding: "8px 10px", borderBottom: `2px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {monthKeys.map((key) => {
+                        const [y, mo] = key.split("-").map(Number);
+                        // Read the SAME merged, roster-aware figures the rest of the dashboard uses,
+                        // so STR (channel) and RevPAR (headline) properties both display correctly.
+                        const srow = d.byYear?.[y]?.[mo - 1] || null;
+                        const rev = srow?.revenue || 0;
+                        const occ = srow?.occ ?? null;
+                        const nights = srow?.nights != null ? Math.round(srow.nights) : null;
+                        const adr = srow?.adr ?? null;
+                        const revpar = srow?.revpar ?? null;
+                        const over = srow?.overbooked;
+                        return (
+                          <tr key={key} style={{ borderBottom: `1px solid ${C.track}` }}>
+                            <td style={{ padding: "6px 10px", fontWeight: 600, whiteSpace: "nowrap" }}>{MONTHS[mo - 1]} {y}</td>
+                            <td style={{ padding: "6px 10px" }}><EditNum value={rev || ""} prefix="$" onCommit={(v) => setCell(d.pid, key, "revenue", v)} /></td>
+                            <td style={{ padding: "6px 10px", color: over ? C.bad : undefined, fontWeight: over ? 700 : undefined }}>{occ != null ? (occ * 100).toFixed(1) + "%" : "—"}{over ? " ⚠" : ""}</td>
+                            <td style={{ padding: "6px 10px", color: C.muted }}>{nights != null ? nights : "—"}</td>
+                            <td style={{ padding: "6px 10px" }}>{fmtMoney(adr)}</td>
+                            <td style={{ padding: "6px 10px" }}>{fmtMoney(revpar)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {d.ota?.length > 0 && (
+                  <div style={{ marginTop: 14 }}>
+                    <div className="ui" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: .4, color: C.muted, marginBottom: 6 }}>Channel revenue on file</div>
+                    <div className="ui" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {d.ota.sort((a, b) => b.value - a.value).map((o) => (
+                        <span key={o.name} style={{ fontSize: 12.5, padding: "4px 10px", borderRadius: 8, background: "#f4f6f8", display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ width: 9, height: 9, borderRadius: 3, background: OTA_COLORS[o.name] || OTA_COLORS.Other }} />{o.name}: {fmtMoney(o.value)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+function EditNum({ value, onCommit, prefix, suffix, width = 95 }) {
+  const [v, setV] = useState(value ?? "");
+  useEffect(() => { setV(value ?? ""); }, [value]);
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+      {prefix && <span style={{ color: C.muted, fontSize: 12 }}>{prefix}</span>}
+      <input value={v} onChange={(e) => setV(e.target.value)} onBlur={() => onCommit(v)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+        placeholder="—" style={{ width, fontSize: 13, padding: "5px 7px", borderRadius: 6, border: `1px solid ${C.border}`, background: "#fff" }} />
+      {suffix && <span style={{ color: C.muted, fontSize: 12 }}>{suffix}</span>}
+    </span>
+  );
+}
+
+/* ---------------- SALES PIPELINE (group/corporate CRM) ---------------- */
+const DEAL_STAGES = [
+  { id: "lead", label: "Lead", color: "#8ea0b8" },
+  { id: "proposal", label: "Proposal", color: "#3b7dd8" },
+  { id: "contract", label: "Contract Out", color: "#e07b1f" },
+  { id: "won", label: "Won", color: "#1f7a4d" },
+  { id: "lost", label: "Lost", color: "#cf3a3a" },
+];
+function SalesPipeline({ model, setModel }) {
+  const deals = model.deals || [];
+  const [adding, setAdding] = useState(false);
+  const blank = { id: "", company: "", contact: "", property: "soma", value: "", nights: "", stage: "lead", arrival: "", notes: "" };
+  const [form, setForm] = useState(blank);
+
+  const upsert = (deal) => setModel((m) => {
+    const list = m.deals || [];
+    const exists = list.some((x) => x.id === deal.id);
+    const next = exists ? list.map((x) => (x.id === deal.id ? deal : x)) : [...list, deal];
+    return { ...m, deals: next };
+  });
+  const removeDeal = (id) => setModel((m) => ({ ...m, deals: (m.deals || []).filter((x) => x.id !== id) }));
+  const move = (deal, stage) => upsert({ ...deal, stage, ...(stage === "won" ? { wonAt: new Date().toISOString() } : {}) });
+  const submit = () => {
+    if (!form.company) return;
+    const d = { ...form, id: form.id || "d" + Date.now(), value: Number(form.value) || 0, nights: Number(form.nights) || 0, createdAt: form.createdAt || new Date().toISOString() };
+    upsert(d); setForm(blank); setAdding(false);
+  };
+
+  // funnel metrics
+  const open = deals.filter((d) => !["won", "lost"].includes(d.stage));
+  const won = deals.filter((d) => d.stage === "won");
+  const lost = deals.filter((d) => d.stage === "lost");
+  const decided = won.length + lost.length;
+  const winRate = decided ? won.length / decided : null;
+  const avgWon = won.length ? won.reduce((a, d) => a + (d.value || 0), 0) / won.length : null;
+  const pipelineValue = open.reduce((a, d) => a + (d.value || 0), 0);
+  const wonValue = won.reduce((a, d) => a + (d.value || 0), 0);
+  const ttc = (() => {
+    const days = won.filter((d) => d.wonAt && d.createdAt).map((d) => (new Date(d.wonAt) - new Date(d.createdAt)) / 86400000);
+    return days.length ? Math.round(days.reduce((a, b) => a + b, 0) / days.length) : null;
+  })();
+
+  const field = (k, label, props = {}) => (
+    <label className="ui" style={{ fontSize: 11.5, color: C.muted, display: "block" }}>{label}
+      <input value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} {...props}
+        style={{ width: "100%", marginTop: 3, fontSize: 13, padding: "7px 9px", borderRadius: 7, border: `1px solid ${C.border}`, boxSizing: "border-box" }} />
+    </label>
+  );
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
+        <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>Sales Pipeline</h1>
+          <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>Group, corporate & convention bookings across the portfolio</div></div>
+        <button className="ui" onClick={() => { setForm(blank); setAdding(true); }} style={{ ...btnSm, marginLeft: "auto" }}><Plus size={14} /> New deal</button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 12, margin: "16px 0" }}>
+        <FunnelStat label="Open pipeline" value={fmtMoney(pipelineValue)} sub={`${open.length} active deals`} />
+        <FunnelStat label="Won (booked)" value={fmtMoney(wonValue)} sub={`${won.length} deals`} good />
+        <FunnelStat label="Win rate" value={winRate != null ? fmtPct(winRate) : "—"} sub={decided ? `${won.length}/${decided} decided` : "no closed deals"} />
+        <FunnelStat label="Avg deal size" value={avgWon != null ? fmtMoney(avgWon) : "—"} sub="won deals" />
+        <FunnelStat label="Avg time to close" value={ttc != null ? ttc + " days" : "—"} sub="lead → won" />
+      </div>
+
+      {adding && (
+        <Panel title={form.id ? "Edit deal" : "New deal"} style={{ marginBottom: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+            {field("company", "Company / group")}
+            {field("contact", "Contact")}
+            <label className="ui" style={{ fontSize: 11.5, color: C.muted, display: "block" }}>Property
+              <select value={form.property} onChange={(e) => setForm({ ...form, property: e.target.value })} style={{ width: "100%", marginTop: 3, fontSize: 13, padding: "7px 9px", borderRadius: 7, border: `1px solid ${C.border}` }}>
+                {PROPERTIES.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </label>
+            {field("value", "Est. value ($)", { type: "number" })}
+            {field("nights", "Room nights", { type: "number" })}
+            {field("arrival", "Arrival date", { type: "date" })}
+            <label className="ui" style={{ fontSize: 11.5, color: C.muted, display: "block" }}>Stage
+              <select value={form.stage} onChange={(e) => setForm({ ...form, stage: e.target.value })} style={{ width: "100%", marginTop: 3, fontSize: 13, padding: "7px 9px", borderRadius: 7, border: `1px solid ${C.border}` }}>
+                {DEAL_STAGES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+              </select>
+            </label>
+            <div style={{ gridColumn: "span 2" }}>{field("notes", "Notes")}</div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button onClick={submit} style={btnSm}>Save deal</button>
+            <button onClick={() => setAdding(false)} className="ui" style={{ fontSize: 12.5, padding: "7px 12px", borderRadius: 8, border: `1px solid ${C.border}`, background: "#fff", cursor: "pointer" }}>Cancel</button>
+          </div>
+        </Panel>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${DEAL_STAGES.length},1fr)`, gap: 10, alignItems: "start" }}>
+        {DEAL_STAGES.map((stage) => {
+          const col = deals.filter((d) => d.stage === stage.id);
+          const sum = col.reduce((a, d) => a + (d.value || 0), 0);
+          return (
+            <div key={stage.id} style={{ background: "#f4f5f7", borderRadius: 12, padding: 10, minHeight: 120 }}>
+              <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 8, background: stage.color }} />
+                <span style={{ fontWeight: 700, fontSize: 12.5 }}>{stage.label}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11, color: C.muted }}>{col.length} · {fmtMoney(sum)}</span>
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {col.map((d) => (
+                  <div key={d.id} style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 9, padding: 10, borderLeft: `3px solid ${PROP_BY_ID[d.property]?.color || C.muted}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
+                      <span style={{ fontWeight: 700, fontSize: 13 }}>{d.company}</span>
+                      <span className="ui" style={{ display: "flex", gap: 4 }}>
+                        <button title="Edit" onClick={() => { setForm({ ...blank, ...d, value: String(d.value || ""), nights: String(d.nights || "") }); setAdding(true); }} style={iconBtn}>✎</button>
+                        <button title="Delete" onClick={() => removeDeal(d.id)} style={iconBtn}>×</button>
+                      </span>
+                    </div>
+                    <div className="ui" style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{PROP_BY_ID[d.property]?.short}{d.contact ? " · " + d.contact : ""}</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 12 }}>
+                      <span style={{ fontWeight: 700 }}>{fmtMoney(d.value)}</span>
+                      {d.nights ? <span style={{ color: C.muted }}>{d.nights} nts</span> : null}
+                    </div>
+                    {d.arrival && <div className="ui" style={{ fontSize: 10.5, color: C.faint, marginTop: 3 }}>Arrives {d.arrival}</div>}
+                    <select value={d.stage} onChange={(e) => move(d, e.target.value)} className="ui" style={{ width: "100%", marginTop: 7, fontSize: 11, padding: "4px 6px", borderRadius: 6, border: `1px solid ${C.border}`, color: C.sub }}>
+                      {DEAL_STAGES.map((s) => <option key={s.id} value={s.id}>Move to: {s.label}</option>)}
+                    </select>
+                  </div>
+                ))}
+                {!col.length && <div className="ui" style={{ fontSize: 11, color: C.faint, textAlign: "center", padding: "10px 0" }}>—</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {!deals.length && <div className="ui" style={{ color: C.muted, fontSize: 13, textAlign: "center", marginTop: 20 }}>No deals yet. Click "New deal" to start tracking group & corporate leads.</div>}
+    </div>
+  );
+}
+const iconBtn = { background: "transparent", border: "none", cursor: "pointer", fontSize: 13, color: "#94a3b8", lineHeight: 1, padding: "0 2px" };
+function FunnelStat({ label, value, sub, good }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 16px" }}>
+      <div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .3, fontWeight: 700 }}>{label}</div>
+      <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700, marginTop: 6, color: good ? C.good : C.ink }}>{value}</div>
+      {sub && <div className="ui" style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+/* ---------------- SLACK DIGEST ---------------- */
+function SlackDigest({ model, propIds }) {
+  const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
+  const send = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const text = await callClaude({
+        system: "You write concise daily revenue digests for a hotel/STR ops team. Plain text, Slack-friendly, with a few bullet lines. No preamble.",
+        messages: [{ role: "user", content: `Write a short Slack digest for ${new Date().toDateString()} from this data:\n\n${snapshotForAI(model, propIds)}\n\nInclude: portfolio revenue on the books this month, the standout property, and one action. Keep under 120 words.` }],
+        max_tokens: 500,
+      });
+      const res = await fetch("/api/slack", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || "Slack not configured"); }
+      setMsg({ ok: true, text: "Digest sent to Slack." });
+    } catch (e) { setMsg({ ok: false, text: e.message === "Slack not configured" ? "Add SLACK_WEBHOOK_URL in Vercel to enable this." : "Couldn't send — check the webhook setup." }); }
+    setBusy(false);
+  };
+  return (
+    <Panel title="Slack digest" right={<button className="ui" onClick={send} disabled={busy} style={btnSm}>{busy ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={13} />} Send now</button>}>
+      <div className="ui" style={{ fontSize: 13, color: C.sub }}>Push a one-tap summary of today's numbers to your team's Slack channel.</div>
+      {msg && <div className="ui" style={{ marginTop: 8, fontSize: 12.5, color: msg.ok ? C.good : C.bad }}>{msg.text}</div>}
+    </Panel>
+  );
+}
+
+/* ---------------- WORLD CUP ---------------- */
+const WC_SCOPES = [{ id: "all", label: "Portfolio" }, { id: "fortworth", label: "Fort Worth" }, { id: "arlington", label: "Arlington" }];
+function wcHeat(occ) {
+  if (occ == null) return "#ffffff";
+  const t = Math.max(0, Math.min(1, occ));
+  const r = Math.round(243 + (23 - 243) * t), g = Math.round(246 + (58 - 246) * t), b = Math.round(250 + (104 - 250) * t);
+  return `rgb(${r},${g},${b})`;
+}
+function scopeBtn(active, color) {
+  return { background: active ? color : "#fff", color: active ? "#fff" : C.sub, border: `1px solid ${active ? color : C.border}`, borderRadius: 8, padding: "7px 13px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" };
+}
+function WorldCupPage({ model, onUpload }) {
+  const [scope, setScope] = useState("all");
+  const propIds = useMemo(() => {
+    if (scope === "all") return PROPERTIES.map((p) => p.id);
+    if (scope === "fortworth" || scope === "arlington") return PROPS_IN(scope).map((p) => p.id);
+    return [scope];
+  }, [scope]);
+  const wc = useMemo(() => deriveWorldCup(model, propIds), [model, propIds.join()]);
+  const accent = PROP_BY_ID[scope] ? PROP_BY_ID[scope].color : "#f0b21b";
+
+  const cards = [
+    { label: "World Cup Revenue", icon: <DollarSign size={15} />, val: fmtMoney(wc.totals.revenue) },
+    { label: "World Cup Occupancy %", icon: <Percent size={15} />, val: fmtPct(wc.totals.occ) },
+    { label: "World Cup ADR", icon: <BedDouble size={15} />, val: fmtMoney(wc.totals.adr) },
+    { label: "World Cup RevPAR", icon: <Gauge size={15} />, val: fmtMoney(wc.totals.revpar) },
+  ];
+
+  const weeks = useMemo(() => {
+    const first = new Date(WC_START + "T00:00");
+    const lead = first.getDay();
+    const cells = [];
+    for (let i = 0; i < lead; i++) cells.push(null);
+    wc.byDate.forEach((d) => cells.push(d));
+    while (cells.length % 7 !== 0) cells.push(null);
+    const wk = []; for (let i = 0; i < cells.length; i += 7) wk.push(cells.slice(i, i + 7));
+    return wk;
+  }, [wc]);
+
+  const flags = wc.byDate.filter((d) => d.match && d.occ != null && d.occ < 0.7 && d.units > 0).sort((a, b) => (a.occ || 0) - (b.occ || 0));
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
+        <Trophy size={26} style={{ color: "#f0b21b" }} />
+        <h1 style={{ fontFamily: "Georgia, serif", fontSize: 28, fontWeight: 700, margin: 0 }}>World Cup 2026</h1>
+      </div>
+      <div className="ui" style={{ color: C.muted, fontSize: 13.5, marginBottom: 16 }}>June 12 – July 15 · AT&T Stadium (Arlington) hosts 9 matches incl. the July 14 semifinal</div>
+
+      <div className="ui" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18, alignItems: "center" }}>
+        {WC_SCOPES.map((s) => <button key={s.id} onClick={() => setScope(s.id)} style={scopeBtn(scope === s.id, "#f0b21b")}>{s.label}</button>)}
+        <span style={{ width: 1, height: 22, background: C.border, margin: "0 4px" }} />
+        {PROPERTIES.map((p) => <button key={p.id} onClick={() => setScope(p.id)} style={scopeBtn(scope === p.id, p.color)}>{p.short}</button>)}
+      </div>
+
+      {!wc.has && (
+        <div className="ui" onClick={onUpload} style={{ cursor: "pointer", border: `2px dashed ${C.borderStrong}`, borderRadius: 16, padding: "40px 24px", textAlign: "center", background: "#fafbfc", marginBottom: 20 }}>
+          <Upload size={24} style={{ color: C.muted }} />
+          <div style={{ fontWeight: 600, marginTop: 8, color: C.ink }}>Upload your World Cup KPI file</div>
+          <div style={{ color: C.muted, fontSize: 13, marginTop: 3 }}>A file named with "World Cup" containing a per-date sheet — it auto-loads here.</div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 14 }}>
+        {cards.map((c) => (
+          <div key={c.label} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px", borderTop: `3px solid ${accent}` }}>
+            <div className="ui" style={{ display: "flex", alignItems: "center", gap: 6, color: C.muted, fontSize: 11, fontWeight: 700, letterSpacing: .3, textTransform: "uppercase" }}>
+              <span style={{ color: accent }}>{c.icon}</span>{c.label}
+            </div>
+            <div style={{ fontFamily: "Georgia, serif", fontSize: 27, fontWeight: 700, marginTop: 7, color: C.ink }}>{c.val}</div>
+          </div>
+        ))}
+      </div>
+
+      {wc.matchOcc != null && wc.nonMatchOcc != null && (
+        <div className="ui" style={{ marginTop: 12, fontSize: 13, color: C.sub, background: "#fffaf0", border: "1px solid #f3e2bf", borderRadius: 10, padding: "9px 14px" }}>
+          Match-day occupancy <b>{fmtPct(wc.matchOcc)}</b> vs. non-match-day <b>{fmtPct(wc.nonMatchOcc)}</b>
+          {wc.nonMatchOcc > 0 && <> — a {((wc.matchOcc / wc.nonMatchOcc - 1) * 100).toFixed(0)}% lift on game days.</>}
+        </div>
+      )}
+
+      <Panel title="Demand calendar — occupancy heat & match days" style={{ marginTop: 16 }}>
+        <div className="ui" style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 5 }}>
+          {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
+            <div key={d} style={{ fontSize: 10.5, fontWeight: 700, color: C.muted, textAlign: "center", textTransform: "uppercase", letterSpacing: .5, paddingBottom: 2 }}>{d}</div>
+          ))}
+          {weeks.flat().map((cell, i) => {
+            if (!cell) return <div key={i} />;
+            const d = new Date(cell.date + "T00:00");
+            const dark = (cell.occ || 0) > 0.55;
+            return (
+              <div key={i} title={`${cell.date}: ${fmtPct(cell.occ)} occ, ${fmtMoney(cell.revenue)}`}
+                style={{ background: wcHeat(cell.occ), border: `1px solid ${cell.match ? WC_TIER_COLOR[cell.match.tier] : C.border}`, borderRadius: 9, padding: "6px 7px", minHeight: 80, position: "relative" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#fff" : C.ink }}>{d.getDate()}</div>
+                {cell.match && (
+                  <div style={{ fontSize: 8.5, fontWeight: 700, color: "#fff", background: WC_TIER_COLOR[cell.match.tier], borderRadius: 5, padding: "1px 4px", marginTop: 2, lineHeight: 1.25 }}>
+                    {cell.match.tier === 4 ? "★ " : "⚽ "}{cell.match.teams}
+                  </div>
+                )}
+                <div style={{ position: "absolute", bottom: 5, left: 7, right: 7 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#fff" : C.ink }}>{cell.occ != null ? (cell.occ * 100).toFixed(0) + "%" : "—"}</div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: dark ? "#fff" : C.ink }}>{cell.revenue ? fmtMoney(cell.revenue) : ""}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="ui" style={{ display: "flex", gap: 14, marginTop: 12, fontSize: 11, color: C.muted, flexWrap: "wrap" }}>
+          <span>Shade = occupancy</span>
+          {[[1, "Group (TBD)"], [3, "Marquee group"], [2, "Knockout"], [4, "Semifinal"]].map(([t, l]) => (
+            <span key={t} style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: WC_TIER_COLOR[t] }} />{l}</span>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel title="Daily revenue across the window" style={{ marginTop: 16 }}>
+        {wc.has ? (
+          <ResponsiveContainer width="100%" height={230}>
+            <BarChart data={wc.byDate.map((d) => ({ label: d.date.slice(5), revenue: d.revenue, m: !!d.match }))} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 9, fill: C.muted }} axisLine={false} tickLine={false} interval={2} />
+              <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
+              <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+              <Bar dataKey="revenue" radius={[3, 3, 0, 0]}>
+                {wc.byDate.map((d, i) => <Cell key={i} fill={d.match ? WC_TIER_COLOR[d.match.tier] : "#c9d0da"} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        ) : <Empty text="Upload World Cup data to see daily revenue." />}
+      </Panel>
+
+      <Panel title="Match schedule — occupancy & revenue per game date" style={{ marginTop: 16 }}>
+        <div style={{ overflowX: "auto" }}>
+          <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: .4 }}>
+                {["Date", "Match", "Round", "Occupancy", "Revenue", "ADR"].map((h) => <th key={h} style={{ padding: "8px 10px", borderBottom: `2px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {WORLD_CUP_MATCHES.map((m) => {
+                const day = wc.byDate.find((d) => d.date === m.date);
+                return (
+                  <tr key={m.date} style={{ borderBottom: `1px solid ${C.track}` }}>
+                    <td style={{ padding: "8px 10px", fontWeight: 600, whiteSpace: "nowrap" }}>{new Date(m.date + "T00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</td>
+                    <td style={{ padding: "8px 10px" }}><span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 8, background: WC_TIER_COLOR[m.tier], marginRight: 7 }} />{m.teams}</td>
+                    <td style={{ padding: "8px 10px", color: C.muted }}>{m.round}</td>
+                    <td style={{ padding: "8px 10px", fontWeight: 600 }}>{fmtPct(day?.occ)}</td>
+                    <td style={{ padding: "8px 10px" }}>{fmtMoney(day?.revenue)}</td>
+                    <td style={{ padding: "8px 10px" }}>{fmtMoney(day?.adr)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      {flags.length > 0 && (
+        <Panel title="Pricing opportunities — match days still under 70% booked" style={{ marginTop: 16 }}>
+          <div style={{ display: "grid", gap: 8 }}>
+            {flags.map((d) => (
+              <div key={d.date} className="ui" style={{ display: "flex", alignItems: "center", gap: 11, padding: "10px 12px", borderRadius: 10, background: "#fffaf0", border: "1px solid #f3e2bf" }}>
+                <Target size={16} style={{ color: "#b7791f", flexShrink: 0 }} />
+                <span style={{ fontWeight: 700, fontSize: 13 }}>{d.match.teams}</span>
+                <span style={{ fontSize: 13, color: C.sub }}>· {new Date(d.date + "T00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} — only {fmtPct(d.occ)} booked at {fmtMoney(d.adr)} ADR. Demand is here; push rate or fill.</span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const required = import.meta.env.VITE_APP_PASSWORD || "";
+  const [unlocked, setUnlocked] = useState(!required);
+  const [entry, setEntry] = useState("");
+  const [bad, setBad] = useState(false);
+
+  if (unlocked) return <Dashboard />;
+
+  const tryUnlock = () => {
+    if (entry === required) setUnlocked(true);
+    else { setBad(true); setEntry(""); }
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#edeef0", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Helvetica Neue',Helvetica,Arial,sans-serif" }}>
+      <div style={{ background: "#fff", border: "1px solid #e2e5e9", borderRadius: 16, padding: 36, width: 360, boxShadow: "0 8px 30px rgba(20,30,50,.08)" }}>
+        <div style={{ fontSize: 11, letterSpacing: 3, color: "#8ea0b8", fontWeight: 700 }}>SIDECAR HOSPITALITY</div>
+        <div style={{ fontFamily: "Georgia, serif", fontSize: 24, fontWeight: 700, color: "#1b2330", marginTop: 4, marginBottom: 18 }}>SHP Reporting Dashboard</div>
+        <input
+          type="password" value={entry} autoFocus
+          onChange={(e) => { setEntry(e.target.value); setBad(false); }}
+          onKeyDown={(e) => e.key === "Enter" && tryUnlock()}
+          placeholder="Enter password"
+          style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${bad ? "#cf3a3a" : "#e2e5e9"}`, fontSize: 15, outline: "none", boxSizing: "border-box" }}
+        />
+        {bad && <div style={{ color: "#cf3a3a", fontSize: 12.5, marginTop: 8 }}>Incorrect password.</div>}
+        <button onClick={tryUnlock}
+          style={{ width: "100%", marginTop: 14, background: "#243244", color: "#fff", border: "none", borderRadius: 10, padding: "12px", fontSize: 15, fontWeight: 600, cursor: "pointer" }}>
+          Unlock
+        </button>
+      </div>
+    </div>
+  );
+}
