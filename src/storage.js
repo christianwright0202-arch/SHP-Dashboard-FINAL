@@ -1,13 +1,12 @@
 // SHP Dashboard — shared storage (Supabase), with safety rails.
 //
-// WHY THE RAILS: the previous version could silently destroy the shared dataset. If loadModel()
-// failed for any reason (network blip, Supabase timeout), the app kept its EMPTY starting model,
-// flipped to "loaded", and the save effect then wrote that empty model over everyone's real data.
-// One failed read = total data loss. These functions now make that impossible:
-//   1. loadModel THROWS on a real error and only returns null when the row genuinely doesn't exist,
-//      so the app can tell "no data yet" apart from "couldn't reach the database".
-//   2. saveModel refuses to overwrite a populated record with an empty one.
-//   3. Every save first copies the current record to a timestamped backup that can be restored.
+// SAFETY HISTORY (do not simplify):
+//  - The original version could destroy the shared dataset: if loadModel() failed for any reason,
+//    the app kept its EMPTY starting model, marked itself "loaded", and then saved that empty model
+//    over everyone's real data. One failed read = total data loss.
+//  - A later version hardcoded the JSON column as "payload" and broke on tables using another name.
+// So: the JSON column is DISCOVERED at runtime, reads throw loudly instead of returning null, and
+// an empty model can never overwrite a populated record.
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -17,14 +16,39 @@ const TABLE = "dashboard_state";
 const MAIN_ID = "shp-main";
 const MAX_BACKUPS = 12;
 
+// Column names seen across setups; the real one is detected on first use.
+const CANDIDATES = ["payload", "state", "data", "model", "json", "content", "value", "doc"];
+const META_COLS = ["id", "created_at", "updated_at", "inserted_at"];
+
 const client = (URL && KEY) ? createClient(URL, KEY) : null;
 export const isConfigured = () => !!client;
 
-// Does this model actually contain anything worth keeping?
+let COL = null;
+/** Find which column actually holds the JSON, so we never depend on one hardcoded name. */
+async function detectColumn() {
+  if (COL) return COL;
+  if (!client) throw new Error("Supabase not configured");
+  // 1) Read a row and look at its keys — most reliable.
+  const probe = await client.from(TABLE).select("*").limit(1);
+  if (!probe.error && probe.data && probe.data.length) {
+    const keys = Object.keys(probe.data[0]).filter((k) => !META_COLS.includes(k));
+    if (keys.length) { COL = keys[0]; return COL; }
+  }
+  // 2) Table empty (or select * blocked): try each candidate until one doesn't error.
+  for (const c of CANDIDATES) {
+    const t = await client.from(TABLE).select(`id, ${c}`).limit(1);
+    if (!t.error) { COL = c; return COL; }
+  }
+  throw new Error(`Could not find the JSON column on "${TABLE}". Columns tried: ${CANDIDATES.join(", ")}`);
+}
+export async function detectedColumn() { try { return await detectColumn(); } catch { return null; } }
+
+const parse = (v) => { if (v == null) return null; try { return typeof v === "string" ? JSON.parse(v) : v; } catch { throw new Error("stored payload was unreadable"); } };
+
+/** Does this model actually contain anything worth keeping? */
 export function modelHasData(m) {
   if (!m || typeof m !== "object") return false;
-  const props = m.properties || {};
-  for (const p of Object.values(props)) {
+  for (const p of Object.values(m.properties || {})) {
     if (!p) continue;
     if (Object.keys(p.monthly || {}).length) return true;
     if (Object.keys(p.channelMonthly || {}).length) return true;
@@ -37,51 +61,49 @@ export function modelHasData(m) {
 
 /**
  * Returns the stored model, or null if no record exists yet.
- * THROWS if the database could not be reached — callers must treat that as "unknown", never "empty".
+ * THROWS if the database can't be reached — callers must treat that as "unknown", never "empty".
  */
 export async function loadModel() {
   if (!client) return null; // not configured: browser-only mode
-  const { data, error } = await client.from(TABLE).select("payload").eq("id", MAIN_ID).maybeSingle();
+  const col = await detectColumn();
+  const { data, error } = await client.from(TABLE).select(`id, ${col}`).eq("id", MAIN_ID).maybeSingle();
   if (error) throw new Error("loadModel failed: " + error.message);
   if (!data) return null; // genuinely no record yet
-  try {
-    return typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
-  } catch (e) {
-    throw new Error("loadModel: stored payload was unreadable");
-  }
+  return parse(data[col]);
 }
 
 /** Save the model. Refuses to wipe good data; keeps a rolling backup first. */
 export async function saveModel(model, opts = {}) {
   if (!client) return { ok: false, reason: "not-configured" };
-  const incomingHasData = modelHasData(model);
+  let col;
+  try { col = await detectColumn(); } catch (e) { return { ok: false, reason: e.message }; }
 
-  // Guard: never let an empty model overwrite a populated one.
-  if (!incomingHasData && !opts.allowEmpty) {
+  if (!modelHasData(model) && !opts.allowEmpty) {
     let existing = null;
-    try { existing = await loadModel(); } catch (e) { return { ok: false, reason: "guard-load-failed" }; }
+    try { existing = await loadModel(); } catch { return { ok: false, reason: "guard-load-failed" }; }
     if (modelHasData(existing)) {
       console.warn("saveModel BLOCKED: refusing to overwrite existing data with an empty model.");
       return { ok: false, reason: "blocked-empty-overwrite" };
     }
   }
 
-  // Backup the current record before overwriting it.
-  if (incomingHasData) { try { await writeBackup(); } catch (e) { /* backup is best-effort */ } }
+  if (modelHasData(model)) { try { await writeBackup(col); } catch { /* best effort */ } }
 
-  const payload = JSON.stringify({ ...model, lastUpdated: new Date().toISOString() });
-  const { error } = await client.from(TABLE).upsert({ id: MAIN_ID, payload }, { onConflict: "id" });
+  const row = { id: MAIN_ID };
+  row[col] = JSON.stringify({ ...model, lastUpdated: new Date().toISOString() });
+  const { error } = await client.from(TABLE).upsert(row, { onConflict: "id" });
   if (error) return { ok: false, reason: error.message };
   return { ok: true };
 }
 
-async function writeBackup() {
-  const { data } = await client.from(TABLE).select("payload").eq("id", MAIN_ID).maybeSingle();
-  if (!data || !data.payload) return;
-  const cur = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
-  if (!modelHasData(cur)) return; // don't back up nothing
-  const id = "backup-" + new Date().toISOString().replace(/[:.]/g, "-");
-  await client.from(TABLE).upsert({ id, payload: JSON.stringify(cur) }, { onConflict: "id" });
+async function writeBackup(col) {
+  const { data } = await client.from(TABLE).select(`id, ${col}`).eq("id", MAIN_ID).maybeSingle();
+  if (!data || data[col] == null) return;
+  let cur; try { cur = parse(data[col]); } catch { return; }
+  if (!modelHasData(cur)) return;
+  const row = { id: "backup-" + new Date().toISOString().replace(/[:.]/g, "-") };
+  row[col] = JSON.stringify(cur);
+  await client.from(TABLE).upsert(row, { onConflict: "id" });
   await pruneBackups();
 }
 
@@ -94,15 +116,17 @@ export async function listBackups() {
 
 async function pruneBackups() {
   const ids = await listBackups();
-  const stale = ids.slice(MAX_BACKUPS);
-  for (const id of stale) { try { await client.from(TABLE).delete().eq("id", id); } catch (e) {} }
+  for (const id of ids.slice(MAX_BACKUPS)) { try { await client.from(TABLE).delete().eq("id", id); } catch {} }
 }
 
 export async function restoreBackup(id) {
   if (!client) throw new Error("not configured");
-  const { data, error } = await client.from(TABLE).select("payload").eq("id", id).maybeSingle();
+  const col = await detectColumn();
+  const { data, error } = await client.from(TABLE).select(`id, ${col}`).eq("id", id).maybeSingle();
   if (error || !data) throw new Error("backup not found");
-  const model = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
-  await client.from(TABLE).upsert({ id: MAIN_ID, payload: JSON.stringify(model) }, { onConflict: "id" });
+  const model = parse(data[col]);
+  const row = { id: MAIN_ID }; row[col] = JSON.stringify(model);
+  const up = await client.from(TABLE).upsert(row, { onConflict: "id" });
+  if (up.error) throw new Error(up.error.message);
   return model;
 }
