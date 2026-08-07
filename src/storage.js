@@ -56,6 +56,7 @@ export function modelHasData(m) {
   }
   if ((m.events || []).length) return true;
   if (Object.keys(m.ads || {}).length) return true;
+  if (m.roster && Object.keys(m.roster).length) return true;
   return false;
 }
 
