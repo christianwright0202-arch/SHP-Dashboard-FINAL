@@ -1231,7 +1231,7 @@ function Dashboard() {
         </aside>
 
         {/* MAIN */}
-        <main style={{ flex: 1, minWidth: 0 }} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
+        <main className="print-main" style={{ flex: 1, minWidth: 0 }} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
           {/* Top upload bar */}
           <div className="ui no-print" style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "12px 28px", display: "flex", alignItems: "center", gap: 14, position: "sticky", top: 0, zIndex: 5 }}>
             <input ref={fileRef} type="file" multiple accept=".xlsx,.xls,.csv,.tsv,.png,.jpg,.jpeg,.pdf" style={{ display: "none" }}
@@ -1266,12 +1266,41 @@ function Dashboard() {
               <FileText size={14} /> PDF
             </button>
             <style>{`@keyframes spin{to{transform:rotate(360deg)}}
+              @page { size: letter portrait; margin: 0.45in; }
+
               @media print {
                 .no-print, nav, aside { display: none !important; }
-                body { background: #fff !important; }
+                body { background: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
                 .sidebar-root { display: none !important; }
-                .print-main { margin: 0 !important; padding: 0 !important; width: 100% !important; }
-                .recharts-wrapper { page-break-inside: avoid; }
+                .print-main { margin: 0 !important; padding: 0 !important; width: 100% !important; flex: none !important; }
+
+                /* Keep every card whole. .panel covers the Panel component;
+                   the border-radius selector catches hand-rolled cards that
+                   have no class. */
+                .panel,
+                .print-main div[style*="border-radius: 14px"] {
+                  break-inside: avoid !important;
+                  page-break-inside: avoid !important;
+                }
+
+                /* Charts and their captions stay together */
+                .recharts-wrapper, .recharts-responsive-container {
+                  break-inside: avoid !important;
+                  page-break-inside: avoid !important;
+                  max-width: 100% !important;
+                }
+
+                /* Wide tables get cut off at the page edge today because they
+                   sit in horizontally scrolling boxes. Let them shrink instead. */
+                .print-main div[style*="overflow-x"] {
+                  overflow: visible !important;
+                }
+                table { width: 100% !important; font-size: 10px !important; }
+                thead { display: table-header-group; }
+                tr, td, th { break-inside: avoid !important; page-break-inside: avoid !important; }
+
+                /* Never strand a heading at the bottom of a page */
+                h1, h2, h3, h4 { break-after: avoid !important; page-break-after: avoid !important; }
               }`}</style>
           </div>
 
@@ -1351,7 +1380,7 @@ function KpiRow({ k, accent }) {
 
 function Panel({ title, right, children, style }) {
   return (
-    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, ...style }}>
+    <div className="panel" style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, ...style }}>
       <div className="ui" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: .4, color: C.sub, textTransform: "uppercase" }}>{title}</div>
         {right}
