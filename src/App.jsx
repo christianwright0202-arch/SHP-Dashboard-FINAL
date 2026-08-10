@@ -1308,8 +1308,21 @@ function Dashboard() {
                   page-break-inside: avoid !important;
                 }
 
-                .print-main div[style*="overflow-x"] { overflow: visible !important; }
-                table { width: 100% !important; font-size: 10px !important; }
+                .print-main div[style*="overflow-x"] {
+                  overflow: visible !important;
+                  min-width: 0 !important;
+                  width: 100% !important;
+                }
+                table {
+                  width: 100% !important;
+                  min-width: 0 !important;
+                  font-size: 9px !important;
+                }
+                th, td {
+                  padding: 3px 4px !important;
+                  white-space: normal !important;
+                  overflow-wrap: break-word !important;
+                }
                 thead { display: table-header-group; }
                 tr, td, th { break-inside: avoid !important; page-break-inside: avoid !important; }
                 h1, h2, h3, h4 { break-after: avoid !important; page-break-after: avoid !important; }
