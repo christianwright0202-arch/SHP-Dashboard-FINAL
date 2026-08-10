@@ -1034,6 +1034,7 @@ function Dashboard() {
   const [hfDebug, setHfDebug] = useState(null);
   const [busy, setBusy] = useState(false);
   const [propOverride, setPropOverride] = useState("auto");
+  const [printing, setPrinting] = useState(false);
   const fileRef = useRef(null);
   // Editor lock: uploading/editing is gated behind an editor password. Everyone else is view-only.
   const EDITOR_PW = import.meta.env.VITE_EDITOR_PASSWORD || "";
@@ -1068,6 +1069,23 @@ function Dashboard() {
       } catch (e) { console.warn("saveModel error:", e); }
     })();
   }, [model, loadState, canEdit]);
+
+  useEffect(() => {
+    if (!printing) return;
+    // two frames lets Recharts' ResizeObserver fire and redraw,
+    // the timeout covers the animation it does on resize
+    let cancelled = false;
+    const id = requestAnimationFrame(() =>
+      requestAnimationFrame(() =>
+        setTimeout(() => {
+          if (cancelled) return;
+          window.print();
+          setPrinting(false);
+        }, 400)
+      )
+    );
+    return () => { cancelled = true; cancelAnimationFrame(id); };
+  }, [printing]);
 
   const handleFiles = useCallback(async (files) => {
     setBusy(true); setIngestMsg(null);
@@ -1231,7 +1249,14 @@ function Dashboard() {
         </aside>
 
         {/* MAIN */}
-        <main className="print-main" style={{ flex: 1, minWidth: 0 }} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
+        <main
+          className="print-main"
+          style={printing
+            ? { width: 720, maxWidth: 720, flex: "none", minWidth: 0 }
+            : { flex: 1, minWidth: 0 }}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={onDrop}
+        >
           {/* Top upload bar */}
           <div className="ui no-print" style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "12px 28px", display: "flex", alignItems: "center", gap: 14, position: "sticky", top: 0, zIndex: 5 }}>
             <input ref={fileRef} type="file" multiple accept=".xlsx,.xls,.csv,.tsv,.png,.jpg,.jpeg,.pdf" style={{ display: "none" }}
@@ -1261,7 +1286,7 @@ function Dashboard() {
                 </button>
               </>
             )}
-            <button className="navbtn no-print" onClick={() => window.print()} title="Save this view as PDF"
+            <button className="navbtn no-print" onClick={() => setPrinting(true)} title="Save this view as PDF"
               style={{ background: "transparent", color: C.slate, border: `1px solid ${C.border}`, borderRadius: 9, padding: "8px 13px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
               <FileText size={14} /> PDF
             </button>
@@ -1271,55 +1296,22 @@ function Dashboard() {
               @media print {
                 .no-print, nav, aside { display: none !important; }
                 body { background: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-                .sidebar-root { display: none !important; }
                 .print-main { margin: 0 !important; padding: 0 !important; }
 
-                /* Keep every card whole. .panel covers the Panel component;
-                   the border-radius selector catches hand-rolled cards that
-                   have no class. */
                 .panel,
                 .print-main div[style*="border-radius: 14px"] {
                   break-inside: avoid !important;
                   page-break-inside: avoid !important;
                 }
-
-                /* Charts and their captions stay together */
-                /* Recharts measures its container once, on screen, and bakes
-                   that width into the SVG. Print never re-measures, so a
-                   1200px chart lands on a 730px page. The SVG has a viewBox,
-                   so scaling it with CSS keeps everything in proportion. */
-                .recharts-responsive-container,
-                .recharts-wrapper {
-                  width: 100% !important;
-                  height: auto !important;
-                  min-width: 0 !important;
+                .recharts-wrapper, .recharts-responsive-container {
                   break-inside: avoid !important;
                   page-break-inside: avoid !important;
                 }
-                .recharts-wrapper > svg,
-                .recharts-surface {
-                  width: 100% !important;
-                  height: auto !important;
-                }
-                /* Legends are absolutely positioned at the original width, so
-                   let them flow under the chart instead. */
-                .recharts-legend-wrapper {
-                  position: static !important;
-                  width: 100% !important;
-                  text-align: center !important;
-                  margin-top: 4px !important;
-                }
 
-                /* Wide tables get cut off at the page edge today because they
-                   sit in horizontally scrolling boxes. Let them shrink instead. */
-                .print-main div[style*="overflow-x"] {
-                  overflow: visible !important;
-                }
+                .print-main div[style*="overflow-x"] { overflow: visible !important; }
                 table { width: 100% !important; font-size: 10px !important; }
                 thead { display: table-header-group; }
                 tr, td, th { break-inside: avoid !important; page-break-inside: avoid !important; }
-
-                /* Never strand a heading at the bottom of a page */
                 h1, h2, h3, h4 { break-after: avoid !important; page-break-after: avoid !important; }
               }`}</style>
           </div>
