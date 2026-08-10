@@ -1272,7 +1272,7 @@ function Dashboard() {
                 .no-print, nav, aside { display: none !important; }
                 body { background: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
                 .sidebar-root { display: none !important; }
-                .print-main { margin: 0 !important; padding: 0 !important; width: 100% !important; flex: none !important; }
+                .print-main { margin: 0 !important; padding: 0 !important; }
 
                 /* Keep every card whole. .panel covers the Panel component;
                    the border-radius selector catches hand-rolled cards that
@@ -1287,7 +1287,6 @@ function Dashboard() {
                 .recharts-wrapper, .recharts-responsive-container {
                   break-inside: avoid !important;
                   page-break-inside: avoid !important;
-                  max-width: 100% !important;
                 }
 
                 /* Wide tables get cut off at the page edge today because they
