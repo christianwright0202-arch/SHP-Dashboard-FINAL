@@ -1284,9 +1284,30 @@ function Dashboard() {
                 }
 
                 /* Charts and their captions stay together */
-                .recharts-wrapper, .recharts-responsive-container {
+                /* Recharts measures its container once, on screen, and bakes
+                   that width into the SVG. Print never re-measures, so a
+                   1200px chart lands on a 730px page. The SVG has a viewBox,
+                   so scaling it with CSS keeps everything in proportion. */
+                .recharts-responsive-container,
+                .recharts-wrapper {
+                  width: 100% !important;
+                  height: auto !important;
+                  min-width: 0 !important;
                   break-inside: avoid !important;
                   page-break-inside: avoid !important;
+                }
+                .recharts-wrapper > svg,
+                .recharts-surface {
+                  width: 100% !important;
+                  height: auto !important;
+                }
+                /* Legends are absolutely positioned at the original width, so
+                   let them flow under the chart instead. */
+                .recharts-legend-wrapper {
+                  position: static !important;
+                  width: 100% !important;
+                  text-align: center !important;
+                  margin-top: 4px !important;
                 }
 
                 /* Wide tables get cut off at the page edge today because they
