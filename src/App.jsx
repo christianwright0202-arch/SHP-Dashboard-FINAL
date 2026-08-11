@@ -1438,9 +1438,14 @@ function RevenueChart({ d, metric = "revenue" }) {
   const fmtV = (v) => v == null ? "—" : (isPct ? fmtPct(v) : fmtMoney(v));
   const mode = d.meta.compareMode || (d.priorY != null ? "yoy" : "mom");
   const now = new Date();
-  const cur = d.curY;
+  // "Current year" = today's year when the property has any data for it; only
+  // fall back to the latest data year when it has none. Forward-booking months
+  // (e.g. Jan/Feb next year) must not promote the whole chart a year ahead.
+  const thisY = now.getFullYear();
+  const cur = (d.byYear && d.byYear[thisY]) ? thisY : d.curY;
+  const prior = cur != null ? cur - 1 : null;
   const curMonths = (cur != null && d.byYear?.[cur]) ? d.byYear[cur] : {};
-  const priorMonths = (mode === "yoy" && d.priorY != null && d.byYear?.[d.priorY]) ? d.byYear[d.priorY] : {};
+  const priorMonths = (mode === "yoy" && prior != null && d.byYear?.[prior]) ? d.byYear[prior] : {};
   // months that actually have data this year
   const idxs = MONTHS.map((_, i) => i).filter((i) => curMonths[i] || priorMonths[i]);
   if (!idxs.length) return <Empty text="Revenue by month appears once a monthly or RevPAR report is loaded." />;
@@ -1457,7 +1462,7 @@ function RevenueChart({ d, metric = "revenue" }) {
   // headline comparison for the focused month
   const fCur = curMonths[focus]?.[metric] ?? null;
   let cmpVal, cmpLabel;
-  if (mode === "yoy") { cmpVal = priorMonths[focus]?.[metric] ?? null; cmpLabel = `${MONTHS[focus]} ${d.priorY}`; }
+  if (mode === "yoy") { cmpVal = priorMonths[focus]?.[metric] ?? null; cmpLabel = `${MONTHS[focus]} ${prior}`; }
   else { const p = curMonths[focus - 1]?.[metric] ?? null; cmpVal = p; cmpLabel = focus > 0 ? `${MONTHS[focus - 1]} ${cur}` : "prev mo"; }
   const dl = (cmpVal != null && cmpVal > 0 && fCur != null) ? (fCur - cmpVal) / cmpVal : null;
   const accent = d.meta.color;
@@ -1485,7 +1490,7 @@ function RevenueChart({ d, metric = "revenue" }) {
           {showOcc && <YAxis yAxisId="occ" orientation="right" domain={[0, 1]} tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => (v * 100).toFixed(0) + "%"} />}
           <Tooltip formatter={(v, name) => name === "Occupancy" ? fmtPct(v) : fmtV(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          {mode === "yoy" && <Bar yAxisId="rev" dataKey="prior" fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${d.priorY}`} />}
+          {mode === "yoy" && <Bar yAxisId="rev" dataKey="prior" fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${prior}`} />}
           <Bar yAxisId="rev" dataKey="cur" fill={accent} radius={[4, 4, 0, 0]} name={`${cur}`} />
           {showOcc && <ReferenceLine yAxisId="occ" y={0.7} stroke={C.bad} strokeDasharray="5 4" strokeWidth={1.5} label={{ value: "70% goal", position: "insideTopRight", fontSize: 10, fill: C.bad }} />}
           {showOcc && <Line yAxisId="occ" type="monotone" dataKey="occ" name="Occupancy" stroke={C.ink} strokeWidth={2.5} dot={{ r: 2.5, fill: C.ink }} connectNulls />}
@@ -2245,7 +2250,9 @@ function KhorramiPage({ model, setModel }) {
 
 /* ---------------- HISTORICAL MONTHLY REPORT (YoY) ---------------- */
 function YoyReport({ d }) {
-  const cur = d.curY, prior = d.priorY;
+  const thisY = new Date().getFullYear();
+  const cur = (d.byYear && d.byYear[thisY]) ? thisY : d.curY;
+  const prior = cur != null ? cur - 1 : null;
   if (cur == null) return null;
   const pctd = (x, y) => (x != null && y != null && y !== 0) ? (x - y) / y : null;
   const monthRows = MONTHS.map((mn, i) => ({ mn, a: d.byYear[cur]?.[i] || null, b: prior != null ? (d.byYear[prior]?.[i] || null) : null })).filter((r) => r.a || r.b);
