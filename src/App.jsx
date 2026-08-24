@@ -721,10 +721,10 @@ function deriveProperty(pid, model, metaOverride) {
     const d = monthly[k];
     const days = daysInMonth(y, m - 1);
     const avail = (p.availByMonth && p.availByMonth[k] != null) ? p.availByMonth[k] : availUnitNights(pid, y, m - 1, model);
-    const rawOcc = d.occ != null ? d.occ : d.nights && avail ? d.nights / avail : null;
+    const rawOcc = d.suspect ? null : (d.occ != null ? d.occ : d.nights && avail ? d.nights / avail : null);
     const occ = rawOcc; // NOT clamped — an impossible value must be visible, not hidden
     const overbooked = rawOcc != null && rawOcc > 1.0001;
-    const adr = d.adr != null ? d.adr : d.nights ? d.revenue / d.nights : null;
+    const adr = d.suspect ? null : (d.adr != null ? d.adr : d.nights ? d.revenue / d.nights : null);
     const revpar = d.revpar != null ? d.revpar : avail ? d.revenue / avail : null;
     return { key: k, year: y, mIdx: m - 1, label: `${MONTHS[m - 1]} '${String(y).slice(2)}`, monthName: MONTHS[m - 1], revenue: d.revenue, occ, adr, revpar, nights: d.nights, avail, unitsActive: unitsActive(pid, y, m - 1, model), overbooked };
   });
