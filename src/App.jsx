@@ -213,6 +213,7 @@ function toDate(v) {
   return isNaN(d) ? null : d;
 }
 const mkey = (y, mIdx) => `${y}-${String(mIdx + 1).padStart(2, "0")}`;
+const monthKeyLabel = (k) => { const [yy, mo] = String(k).split("-").map(Number); return `${MONTHS[mo - 1]} ${yy}`; };
 const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const parseUnits = (name) => { const m = String(name || "").match(/--\s*(\d+)\s*units/i); return m ? +m[1] : 1; };
 // pull a year-month from a filename like "Bookingcom_SOMA_2026-06.csv"
@@ -833,6 +834,7 @@ const PERIOD_DEFS = [
 function periodMonthList(periodId, now = new Date()) {
   const y = now.getFullYear(), m = now.getMonth();
   const out = [];
+  if (periodId.startsWith("m:")) { const [yy, mo] = periodId.slice(2).split("-").map(Number); out.push({ year: yy, mIdx: mo - 1 }); return out; }
   if (periodId === "mtd") out.push({ year: y, mIdx: m });
   else if (periodId === "qtd") { const qStart = Math.floor(m / 3) * 3; for (let i = qStart; i <= m; i++) out.push({ year: y, mIdx: i }); }
   else if (periodId === "ytd") { for (let i = 0; i <= m; i++) out.push({ year: y, mIdx: i }); }
@@ -1628,13 +1630,16 @@ function useMetricsState(d, alwaysYoy) {
 function MetricsSquares({ d, accent, ctl }) {
   const { period, setPeriod, metric, setMetric, cmp, setCmp, canYoy } = ctl;
   const now = new Date();
+  const monthKeys = (d.series || []).map((s) => s.key);   // only months with data, sorted
+  const curKey = mkey(now.getFullYear(), now.getMonth());  // "current" from TODAY, not max data year
+  const selMonth = period.startsWith("m:") ? period.slice(2) : "";
 
   const statsByMetric = {};
   METRIC_DEFS.forEach((m) => { statsByMetric[m.id] = periodStats(d, period, m.id, now); });
   const active = statsByMetric[metric];
   const mDef = METRIC_DEFS.find((m) => m.id === metric);
 
-  const periodTag = PERIOD_DEFS.find((p) => p.id === period)?.label || "";
+  const periodTag = period.startsWith("m:") ? monthKeyLabel(selMonth) : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
   const cmpLabel = (mid) => {
     const st = statsByMetric[mid];
     // In YoY mode with no prior-year value, suppress the comparison — never silently fall back to MoM.
@@ -1659,6 +1664,13 @@ function MetricsSquares({ d, accent, ctl }) {
       {/* period control — drives these squares AND the linked chart below */}
       <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
         {PERIOD_DEFS.map((p) => pill(() => setPeriod(p.id), period === p.id, p.label, p.id))}
+        {monthKeys.length > 0 && (
+          <select value={selMonth} onChange={(e) => e.target.value && setPeriod("m:" + e.target.value)}
+            style={{ fontSize: 12, fontWeight: 600, padding: "5px 8px", borderRadius: 7, cursor: "pointer", border: `1px solid ${selMonth ? accent : C.border}`, background: "#fff", color: selMonth ? accent : C.sub }}>
+            <option value="">Month…</option>
+            {monthKeys.slice().reverse().map((k) => <option key={k} value={k}>{monthKeyLabel(k)}{k === curKey ? " (current)" : ""}</option>)}
+          </select>
+        )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           <span style={{ fontSize: 11.5, color: C.muted }}>Compare:</span>
           {canYoy && pill(() => setCmp("yoy"), cmp === "yoy", "YoY", "cyoy")}
@@ -1710,7 +1722,7 @@ function PropertyBars({ derived, ctl, accent }) {
   });
   const isPct = metric === "occ";
   const axisFmt = isPct ? (v) => (v * 100).toFixed(0) + "%" : (v) => "$" + (v / 1000).toFixed(0) + "k";
-  const periodTag = PERIOD_DEFS.find((p) => p.id === period)?.label || "";
+  const periodTag = period.startsWith("m:") ? monthKeyLabel(period.slice(2)) : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
   const pill = (oncl, on, label, key) => (
     <button key={key} onClick={oncl} style={{ fontSize: 11.5, fontWeight: 600, padding: "4px 9px", borderRadius: 7, cursor: "pointer", border: `1px solid ${on ? accent : C.border}`, background: on ? accent : "#fff", color: on ? "#fff" : C.sub }}>{label}</button>
   );
