@@ -827,6 +827,7 @@ const PERIOD_DEFS = [
   { id: "mtd", label: "This month" },
   { id: "qtd", label: "This quarter" },
   { id: "ytd", label: "YTD" },
+  { id: "yem", label: "YTD thru last mo" },
   { id: "t12", label: "Last 12 mo" },
 ];
 function periodMonthList(periodId, now = new Date()) {
@@ -835,6 +836,7 @@ function periodMonthList(periodId, now = new Date()) {
   if (periodId === "mtd") out.push({ year: y, mIdx: m });
   else if (periodId === "qtd") { const qStart = Math.floor(m / 3) * 3; for (let i = qStart; i <= m; i++) out.push({ year: y, mIdx: i }); }
   else if (periodId === "ytd") { for (let i = 0; i <= m; i++) out.push({ year: y, mIdx: i }); }
+  else if (periodId === "yem") { for (let i = 0; i < m; i++) out.push({ year: y, mIdx: i }); }
   else if (periodId === "t12") { for (let i = 11; i >= 0; i--) { const d = new Date(y, m - i, 1); out.push({ year: d.getFullYear(), mIdx: d.getMonth() }); } }
   return out;
 }
@@ -1635,7 +1637,9 @@ function MetricsSquares({ d, accent, ctl }) {
   const periodTag = PERIOD_DEFS.find((p) => p.id === period)?.label || "";
   const cmpLabel = (mid) => {
     const st = statsByMetric[mid];
-    const useYoy = cmp === "yoy" && st.yoyValue != null; // auto-fall back to MoM where no prior year
+    // In YoY mode with no prior-year value, suppress the comparison — never silently fall back to MoM.
+    if (cmp === "yoy" && st.yoyValue == null) return { dl: null, vsText: "no prior-year data", kind: "YoY" };
+    const useYoy = cmp === "yoy";
     const cmpVal = useYoy ? st.yoyValue : st.momValue;
     const base = st.value;
     const dl = (cmpVal != null && cmpVal !== 0 && base != null) ? (base - cmpVal) / Math.abs(cmpVal) : null;
