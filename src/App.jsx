@@ -58,6 +58,12 @@ const OTA_COLORS = { Airbnb: "#e23b3b", Vrbo: "#5cb3f0", Expedia: "#f5c518", "Bo
 
 const MODEL = { properties: {}, ads: {}, events: [], eventsSource: "none", lastUpdated: null, goals: {}, activity: [], deals: [], roster: null, sources: {}, budgets: null };
 
+// TEMPORARY forecast occupancy assumption — summer-only trailing history understates fall
+// demand. Applies ONLY to the month-end forecast pickup for the listed months; every other
+// month uses the trailing-window history unchanged. The widget labels these as an assumption.
+// REMOVE AFTER 2026-10-31 — reverts to trailing-window history.
+const FORECAST_OCC_ASSUMPTION = { "2026-09": 0.60, "2026-10": 0.60 };
+
 // World Cup window + AT&T Stadium (Dallas Stadium), Arlington fixtures
 const WC_START = "2026-06-12", WC_END = "2026-07-15";
 const WORLD_CUP_MATCHES = [
@@ -818,7 +824,11 @@ function deriveProperty(pid, model, metaOverride) {
   const completedOcc = series.filter((s) => (s.year < fcY || (s.year === fcY && s.mIdx < fcM)) && s.occ != null);
   const t3 = completedOcc.slice(-3);
   let occHist = null, occWindow = null;
-  if (t3.length) { occHist = t3.reduce((a, s) => a + s.occ, 0) / t3.length; occWindow = `trailing ${t3.length}-mo occ`; }
+  const occAssumed = FORECAST_OCC_ASSUMPTION[curMonthKey];
+  if (occAssumed != null) {
+    occHist = occAssumed;
+    occWindow = `assumed ${Math.round(occAssumed * 100)}% occupancy (${MONTHS[fcM]} ${fcY})`;
+  } else if (t3.length) { occHist = t3.reduce((a, s) => a + s.occ, 0) / t3.length; occWindow = `trailing ${t3.length}-mo occ`; }
   else if (fcM !== 5 && fcM !== 6) {
     const smly = series.find((s) => s.year === fcY - 1 && s.mIdx === fcM && s.occ != null);
     if (smly) { occHist = smly.occ; occWindow = `${MONTHS[fcM]} ${fcY - 1} occ`; }
@@ -1973,9 +1983,10 @@ function ForecastPanel({ derived }) {
   const toGoal = agg.goal ? agg.proj / agg.goal : null;
   const projCount = derived.filter((d) => d.forecast?.projected).length;
   const windows = [...new Set(derived.filter((d) => d.forecast?.projected).map((d) => d.forecast.window).filter(Boolean))];
+  const basis = windows.length === 1 ? windows[0] : (windows.length > 1 ? "mixed by property" : "");
   const methodText = projCount === 0
     ? "On-the-books only — not enough history to project pickup."
-    : `On-the-books (committed) + projected pickup on unsold remaining nights: expected occupancy (${windows.length === 1 ? windows[0] : "trailing 3-mo"}) × current ADR, capped at remaining capacity.${projCount < derived.length ? " Some properties: on-the-books only." : ""}`;
+    : `On-the-books (committed) + projected pickup on unsold remaining nights, valued at current ADR and capped at remaining capacity. Basis: ${basis}.${projCount < derived.length ? " Some properties: on-the-books only." : ""}`;
   return (
     <Panel title="Month-end forecast">
       <div className="ui" style={{ fontSize: 12.5, color: C.muted, marginBottom: 10 }}>{agg.label} · {(agg.frac * 100).toFixed(0)}% of month elapsed</div>
