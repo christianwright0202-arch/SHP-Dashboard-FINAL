@@ -184,6 +184,16 @@ function availUnitNightsRange(pid, year, mIdx, fromDay, toDay, model) {
   });
   return total;
 }
+// Sum the day-level `daily` bucket over [dayStart..dayEnd] of one month → { revenue, nights }.
+function dailySpanSum(daily, y, mIdx, dayStart, dayEnd) {
+  let revenue = 0, nights = 0;
+  const mm = String(mIdx + 1).padStart(2, "0");
+  for (let day = dayStart; day <= dayEnd; day++) {
+    const e = daily[`${y}-${mm}-${String(day).padStart(2, "0")}`];
+    if (e) { revenue += e.revenue || 0; nights += e.nights || 0; }
+  }
+  return { revenue, nights };
+}
 // How many distinct units were live at any point in this month (for display/audit)
 function unitsActive(pid, year, mIdx, model) {
   const r = (model && model.roster && model.roster[pid]) || DEFAULT_ROSTER[pid];
@@ -850,7 +860,25 @@ function deriveProperty(pid, model, metaOverride) {
   const otaByMonth = p.otaByMonth || {};
   const goal = (model.goals && model.goals[pid] != null) ? model.goals[pid] : (meta.goal || null);
 
-  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, resStats: p.resStats || {}, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+  // MTD ACTUAL — true month-to-date from the day-level `daily` bucket: only nights that have
+  // happened (day 1 through today, inclusive), with like-for-like comparison spans. Occupancy
+  // and RevPAR divide by roster capacity for the SAME day span. A comparison is suppressed when
+  // the property's daily coverage doesn't reach the span (e.g. no prior-year data).
+  const daily = p.daily || {};
+  const dailyKeys = Object.keys(daily);
+  const minDailyKey = dailyKeys.length ? dailyKeys.reduce((a, b) => (a < b ? a : b)) : null;
+  const tY = now.getFullYear(), tM = now.getMonth(), tDay = now.getDate();
+  const spanCovered = (yy, mm) => minDailyKey != null && `${yy}-${String(mm + 1).padStart(2, "0")}-01` >= minDailyKey;
+  const spanStats = (yy, mm, dEnd) => ({ ...dailySpanSum(daily, yy, mm, 1, dEnd), avail: availUnitNightsRange(pid, yy, mm, 1, dEnd, model) });
+  const pmD = new Date(tY, tM - 1, 1), pmY = pmD.getFullYear(), pmM = pmD.getMonth();
+  const mtdActual = {
+    current: spanStats(tY, tM, tDay),
+    yoy: spanCovered(tY - 1, tM) ? spanStats(tY - 1, tM, tDay) : null,
+    mom: spanCovered(pmY, pmM) ? spanStats(pmY, pmM, Math.min(tDay, daysInMonth(pmY, pmM))) : null,
+    dayEnd: tDay, month: tM, year: tY,
+  };
+
+  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, resStats: p.resStats || {}, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, mtdActual, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
 }
 // Combine several properties into one derived object (Khorrami "All", or the whole portfolio).
 // Pools correctly: sums revenue + nights per month, then recomputes occ/ADR/RevPAR against the
@@ -859,6 +887,10 @@ function deriveCombined(memberIds, model, meta) {
   // Resolve each member with its OWN best source first (RevPAR or channel fallback), THEN pool.
   // (Merging raw buckets would let a RevPAR member's month keys hide a channel-only member.)
   const monthly = {}, otaByMonth = {}, ota = {}, availByMonth = {};
+  // MTD-actual for a combined view is the SUM of members' spans (revenue + nights + same-span
+  // capacity) — never a fake __combined roster. A comparison span is null only if no member covers it.
+  const mtdAcc = { current: { revenue: 0, nights: 0, avail: 0 }, yoy: null, mom: null, dayEnd: null, month: null, year: null };
+  const addSpan = (dst, src) => { dst.revenue += src.revenue || 0; dst.nights += src.nights || 0; dst.avail += src.avail || 0; };
   memberIds.forEach((mid) => {
     const dm = deriveProperty(mid, model); if (!dm) return;
     dm.series.forEach((s) => {
@@ -868,15 +900,25 @@ function deriveCombined(memberIds, model, meta) {
     });
     for (const [mk, srcs] of Object.entries(dm.otaByMonth || {})) { const dst = (otaByMonth[mk] = otaByMonth[mk] || {}); for (const [s, v] of Object.entries(srcs)) dst[s] = (dst[s] || 0) + v; }
     (dm.ota || []).forEach((o) => { ota[o.name] = (ota[o.name] || 0) + o.value; });
+    const ma = dm.mtdActual;
+    if (ma) {
+      mtdAcc.dayEnd = ma.dayEnd; mtdAcc.month = ma.month; mtdAcc.year = ma.year;
+      addSpan(mtdAcc.current, ma.current);
+      if (ma.yoy) { mtdAcc.yoy = mtdAcc.yoy || { revenue: 0, nights: 0, avail: 0 }; addSpan(mtdAcc.yoy, ma.yoy); }
+      if (ma.mom) { mtdAcc.mom = mtdAcc.mom || { revenue: 0, nights: 0, avail: 0 }; addSpan(mtdAcc.mom, ma.mom); }
+    }
   });
   const merged = { monthly, channelMonthly: {}, ota, otaByMonth, snapshot: null, availByMonth };
   const tempModel = { ...model, properties: { ...model.properties, __combined: merged } };
-  return deriveProperty("__combined", tempModel, meta);
+  const combined = deriveProperty("__combined", tempModel, meta);
+  if (combined) combined.mtdActual = mtdAcc;
+  return combined;
 }
 
 // ---- Period + comparison engine (drives the linked squares + bar graph) ----
 const PERIOD_DEFS = [
-  { id: "mtd", label: "This month" },
+  { id: "mtd", label: "Month (all)" },
+  { id: "mtdActual", label: "MTD actual" },
   { id: "ytd", label: "YTD" },
   { id: "yem", label: "YTD thru last mo" },
 ];
@@ -908,6 +950,15 @@ function poolMonths(d, monthList, metric) {
   if (metric === "occ") return avail ? nights / avail : null; // NOT clamped
   if (metric === "adr") return nights ? rev / nights : null;
   if (metric === "revpar") return avail ? rev / avail : null;
+  return null;
+}
+// Reduce an MTD-actual span { revenue, nights, avail } to a single metric value.
+function spanMetricValue(span, metricId) {
+  if (!span) return null;
+  if (metricId === "revenue") return span.revenue;
+  if (metricId === "occ") return span.avail ? span.nights / span.avail : null;
+  if (metricId === "adr") return span.nights ? span.revenue / span.nights : null;
+  if (metricId === "revpar") return span.avail ? span.revenue / span.avail : null;
   return null;
 }
 function periodStats(d, periodId, metric, now = new Date()) {
@@ -1682,11 +1733,18 @@ function MetricsSquares({ d, accent, ctl }) {
   const selMonth = period.startsWith("m:") ? period.slice(2) : "";
 
   const statsByMetric = {};
-  METRIC_DEFS.forEach((m) => { statsByMetric[m.id] = periodStats(d, period, m.id, now); });
+  const isMtdActual = period === "mtdActual";
+  METRIC_DEFS.forEach((m) => {
+    statsByMetric[m.id] = isMtdActual
+      ? { value: spanMetricValue(d.mtdActual?.current, m.id), yoyValue: spanMetricValue(d.mtdActual?.yoy, m.id), momValue: spanMetricValue(d.mtdActual?.mom, m.id) }
+      : periodStats(d, period, m.id, now);
+  });
   const active = statsByMetric[metric];
   const mDef = METRIC_DEFS.find((m) => m.id === metric);
 
-  const periodTag = period.startsWith("m:") ? monthKeyLabel(selMonth) : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
+  const periodTag = period.startsWith("m:") ? monthKeyLabel(selMonth)
+    : (isMtdActual && d.mtdActual) ? `MTD actual · 1–${d.mtdActual.dayEnd} ${MONTHS[d.mtdActual.month]} ${d.mtdActual.year}`
+    : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
   const cmpLabel = (mid) => {
     const st = statsByMetric[mid];
     // In YoY mode with no prior-year value, suppress the comparison — never silently fall back to MoM.
@@ -1764,12 +1822,14 @@ function PropertyBars({ derived, ctl, accent }) {
   const now = new Date();
   const mDef = METRIC_DEFS.find((m) => m.id === metric);
   const data = derived.map((d) => {
-    const s = periodStats(d, period, metric, now);
+    const s = period === "mtdActual"
+      ? { value: spanMetricValue(d.mtdActual?.current, metric), yoyValue: spanMetricValue(d.mtdActual?.yoy, metric), momValue: spanMetricValue(d.mtdActual?.mom, metric) }
+      : periodStats(d, period, metric, now);
     return { name: d.meta.short, color: d.meta.color, cur: s.value, prevYear: s.yoyValue, prevMonth: s.momValue };
   });
   const isPct = metric === "occ";
   const axisFmt = isPct ? (v) => (v * 100).toFixed(0) + "%" : (v) => "$" + (v / 1000).toFixed(0) + "k";
-  const periodTag = period.startsWith("m:") ? monthKeyLabel(period.slice(2)) : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
+  const periodTag = period.startsWith("m:") ? monthKeyLabel(period.slice(2)) : period === "mtdActual" ? "MTD actual" : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
   const pill = (oncl, on, label, key) => (
     <button key={key} onClick={oncl} style={{ fontSize: 11.5, fontWeight: 600, padding: "4px 9px", borderRadius: 7, cursor: "pointer", border: `1px solid ${on ? accent : C.border}`, background: on ? accent : "#fff", color: on ? "#fff" : C.sub }}>{label}</button>
   );
