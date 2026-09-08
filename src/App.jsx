@@ -158,6 +158,26 @@ function availUnitNights(pid, year, mIdx, model) {
   });
   return total;
 }
+// Available unit-nights for a DAY RANGE [fromDay, toDay] within one month (roster-aware).
+// Used by the month-end forecast for "capacity remaining from tomorrow to month end".
+function availUnitNightsRange(pid, year, mIdx, fromDay, toDay, model) {
+  const days = daysInMonth(year, mIdx);
+  const lo = Math.max(1, fromDay), hi = Math.min(days, toDay);
+  if (hi < lo) return 0;
+  const spanDays = hi - lo + 1;
+  const r = (model && model.roster && model.roster[pid]) || DEFAULT_ROSTER[pid];
+  if (!r) { const u = PROP_BY_ID[pid]?.units || 0; return u * spanDays; }
+  if (r.mode === "flat") return (r.flat || 0) * spanDays;
+  let total = 0;
+  const wStart = new Date(year, mIdx, lo), wEnd = new Date(year, mIdx, hi);
+  (r.units || []).forEach((u) => {
+    const s = parseISO(u.start) || new Date(1900, 0, 1);
+    const e = parseISO(u.end) || new Date(2999, 11, 31);
+    const from = s > wStart ? s : wStart, to = e < wEnd ? e : wEnd;
+    if (to >= from) total += Math.round((to - from) / 86400000) + 1;
+  });
+  return total;
+}
 // How many distinct units were live at any point in this month (for display/audit)
 function unitsActive(pid, year, mIdx, model) {
   const r = (model && model.roster && model.roster[pid]) || DEFAULT_ROSTER[pid];
@@ -785,16 +805,37 @@ function deriveProperty(pid, model, metaOverride) {
     prevRevpar: pmRow ? (pmRow.revpar ?? null) : null,
     has: !!cmRow,
   };
-  // run-rate forecast for the current month
+  // Month-end forecast: on-the-books (committed, NEVER extrapolated) plus projected
+  // pickup on the still-unsold remaining nights, valued at this month's current ADR.
   const dim = daysInMonth(now.getFullYear(), now.getMonth());
   const dayOfMonth = now.getDate();
   const fracElapsed = dayOfMonth / dim;
   const onBooks = currentMonth.revenue;
-  // early in the month, advance bookings dominate, so on-the-books is the best estimate;
-  // later, blend in a run-rate projection
-  const runRate = fracElapsed > 0 ? onBooks / fracElapsed : onBooks;
-  const projection = fracElapsed < 0.5 ? Math.max(onBooks, runRate * 0.5 + onBooks * 0.5) : runRate;
-  const forecast = { onBooks, projection, fracElapsed, dim, dayOfMonth };
+  // Historical occupancy for the pickup: trailing 3 COMPLETED months (skipping null/suspect
+  // occ) as primary; fall back to same-month-last-year only when real prior-year data exists
+  // AND the month isn't Jun/Jul (World Cup distorted those). If neither, don't project.
+  const fcY = now.getFullYear(), fcM = now.getMonth();
+  const completedOcc = series.filter((s) => (s.year < fcY || (s.year === fcY && s.mIdx < fcM)) && s.occ != null);
+  const t3 = completedOcc.slice(-3);
+  let occHist = null, occWindow = null;
+  if (t3.length) { occHist = t3.reduce((a, s) => a + s.occ, 0) / t3.length; occWindow = `trailing ${t3.length}-mo occ`; }
+  else if (fcM !== 5 && fcM !== 6) {
+    const smly = series.find((s) => s.year === fcY - 1 && s.mIdx === fcM && s.occ != null);
+    if (smly) { occHist = smly.occ; occWindow = `${MONTHS[fcM]} ${fcY - 1} occ`; }
+  }
+  const availMonth = availUnitNights(pid, fcY, fcM, model);
+  const availRemaining = availUnitNightsRange(pid, fcY, fcM, dayOfMonth + 1, dim, model);
+  const bookedNights = currentMonth.nights || 0;
+  const adrCurrent = currentMonth.adr;  // this month's actual ADR to date
+  let projection = onBooks, projected = false;
+  if (occHist != null && adrCurrent != null && availMonth > 0) {
+    const expectedFinalNights = availMonth * occHist;
+    let pickupNights = Math.max(0, expectedFinalNights - bookedNights);  // never negative
+    pickupNights = Math.min(pickupNights, availRemaining);                // can't exceed nights left
+    projection = onBooks + pickupNights * adrCurrent;
+    projected = true;
+  }
+  const forecast = { onBooks, projection, fracElapsed, dim, dayOfMonth, projected, window: occWindow };
 
   const otaByMonth = p.otaByMonth || {};
   const goal = (model.goals && model.goals[pid] != null) ? model.goals[pid] : (meta.goal || null);
@@ -826,20 +867,16 @@ function deriveCombined(memberIds, model, meta) {
 // ---- Period + comparison engine (drives the linked squares + bar graph) ----
 const PERIOD_DEFS = [
   { id: "mtd", label: "This month" },
-  { id: "qtd", label: "This quarter" },
   { id: "ytd", label: "YTD" },
   { id: "yem", label: "YTD thru last mo" },
-  { id: "t12", label: "Last 12 mo" },
 ];
 function periodMonthList(periodId, now = new Date()) {
   const y = now.getFullYear(), m = now.getMonth();
   const out = [];
   if (periodId.startsWith("m:")) { const [yy, mo] = periodId.slice(2).split("-").map(Number); out.push({ year: yy, mIdx: mo - 1 }); return out; }
   if (periodId === "mtd") out.push({ year: y, mIdx: m });
-  else if (periodId === "qtd") { const qStart = Math.floor(m / 3) * 3; for (let i = qStart; i <= m; i++) out.push({ year: y, mIdx: i }); }
   else if (periodId === "ytd") { for (let i = 0; i <= m; i++) out.push({ year: y, mIdx: i }); }
   else if (periodId === "yem") { for (let i = 0; i < m; i++) out.push({ year: y, mIdx: i }); }
-  else if (periodId === "t12") { for (let i = 11; i >= 0; i--) { const d = new Date(y, m - i, 1); out.push({ year: d.getFullYear(), mIdx: d.getMonth() }); } }
   return out;
 }
 function shiftMonthsYear(list) { return list.map((x) => ({ year: x.year - 1, mIdx: x.mIdx })); }
@@ -1934,15 +1971,20 @@ function ForecastPanel({ derived }) {
     return a;
   }, { onBooks: 0, proj: 0, goal: 0, frac: 0, label: "" });
   const toGoal = agg.goal ? agg.proj / agg.goal : null;
+  const projCount = derived.filter((d) => d.forecast?.projected).length;
+  const windows = [...new Set(derived.filter((d) => d.forecast?.projected).map((d) => d.forecast.window).filter(Boolean))];
+  const methodText = projCount === 0
+    ? "On-the-books only — not enough history to project pickup."
+    : `On-the-books (committed) + projected pickup on unsold remaining nights: expected occupancy (${windows.length === 1 ? windows[0] : "trailing 3-mo"}) × current ADR, capped at remaining capacity.${projCount < derived.length ? " Some properties: on-the-books only." : ""}`;
   return (
-    <Panel title="Month-end forecast (run-rate)">
+    <Panel title="Month-end forecast">
       <div className="ui" style={{ fontSize: 12.5, color: C.muted, marginBottom: 10 }}>{agg.label} · {(agg.frac * 100).toFixed(0)}% of month elapsed</div>
       <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
         <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>On the books</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700 }}>{fmtMoney(agg.onBooks)}</div></div>
         <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>Projected month-end</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700, color: "#14274d" }}>{fmtMoney(agg.proj)}</div></div>
         {agg.goal > 0 && <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>vs Goal</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700, color: toGoal >= 1 ? C.good : C.bad }}>{fmtPct(toGoal)}</div></div>}
       </div>
-      <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 10 }}>Projection blends on-the-books with run-rate; most accurate once the month is underway and with daily pacing data.</div>
+      <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 10 }}>{methodText}</div>
     </Panel>
   );
 }
