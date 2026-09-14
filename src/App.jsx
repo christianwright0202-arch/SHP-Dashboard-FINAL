@@ -44,9 +44,11 @@ const PROPERTIES = [
   { id: "ryan", name: "The Ryan", short: "Ryan", color: "#173a63", location: "Arlington", units: 14, market: "arlington", goal: 60000, match: /(ballpark|ryan)/i, compareMode: "yoy" },
   { id: "woodbrook", name: "Woodbrook", short: "Woodbrook", color: "#138a8a", location: "Arlington", units: 1, market: "arlington", goal: 8000, match: /woodbrook/i, compareMode: "mom", group: "khorrami" },
   { id: "rogers", name: "Rogers", short: "Rogers", color: "#b5651d", location: "Arlington", units: 2, market: "arlington", goal: 16000, match: /rogers/i, compareMode: "mom", group: "khorrami" },
+  // Northeast: 3 of 4 townhomes live (706B pending). At 706B launch: units 3→4, goal 15000→20000.
+  { id: "northeast", name: "Northeast", short: "Northeast", color: "#a21caf", location: "Arlington", units: 3, market: "arlington", goal: 15000, match: /northeast/i, compareMode: "mom", group: "khorrami" },
 ];
 // Khorrami = combined Woodbrook + Rogers view (shown as one Arlington tab with an All/Woodbrook/Rogers toggle)
-const KHORRAMI = { id: "khorrami", name: "Khorrami", short: "Khorrami", color: "#0f766e", location: "Arlington", market: "arlington", members: ["woodbrook", "rogers"], units: 3, compareMode: "mom" };
+const KHORRAMI = { id: "khorrami", name: "Khorrami", short: "Khorrami", color: "#0f766e", location: "Arlington", market: "arlington", members: ["woodbrook", "rogers", "northeast"], units: 6, compareMode: "mom" };
 // Default OTA commission rates for net-of-fee view (editable assumption)
 const CHANNEL_FEES = { Airbnb: 0.15, Vrbo: 0.08, Expedia: 0.17, "Booking.com": 0.15, Direct: 0, Other: 0.12 };
 const PROPS_IN = (region) => PROPERTIES.filter((p) => p.market === region);
@@ -113,6 +115,13 @@ const DEFAULT_ROSTER = {
   harley: { mode: "flat", flat: 3 },
   woodbrook: { mode: "flat", flat: 1 },
   rogers: { mode: "flat", flat: 2 },
+  // Northeast: 4 townhomes at 704 NE St, Arlington. 704A/704B/706A live 2026-09-11.
+  // 706B not finished — add it here with its real start date when it goes live (as with Kress 201).
+  northeast: { mode: "list", units: [
+    { name: "704A", start: "2026-09-11", end: null },
+    { name: "704B", start: "2026-09-11", end: null },
+    { name: "706A", start: "2026-09-11", end: null },
+  ] },
   // Kress: 7 units → 402 online May 2025 → 8; 201 online Feb 2026 → 9
   kress: { mode: "list", units: [
     { name: "Kress - 306", start: null, end: null },
@@ -2343,19 +2352,22 @@ function PropertyPage({ pid, model, setModel }) {
 function KhorramiPage({ model, setModel }) {
   const [scope, setScope] = useState("all");
   const members = KHORRAMI.members;
+  const now = new Date();
   const d = useMemo(() => {
     if (scope === "all") return deriveCombined(members, model, { ...KHORRAMI });
     return deriveProperty(scope, model);
   }, [scope, model]);
   const ctl = useMetricsState(d, false);
   const meta = scope === "all" ? KHORRAMI : PROP_BY_ID[scope];
-  const scopes = [{ id: "all", name: "All (combined)" }, { id: "woodbrook", name: "Woodbrook" }, { id: "rogers", name: "Rogers" }];
+  const scopes = [{ id: "all", name: "All (combined)" }, ...members.map((mid) => ({ id: mid, name: PROP_BY_ID[mid].name }))];
+  const memberNames = members.map((mid) => PROP_BY_ID[mid].name).join(" + ");
+  const liveUnits = members.reduce((s, mid) => s + unitsActive(mid, now.getFullYear(), now.getMonth(), model), 0);
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
         <span style={{ width: 16, height: 16, borderRadius: 5, background: KHORRAMI.color }} />
         <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>Khorrami</h1>
-          <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{KHORRAMI.location} · Woodbrook + Rogers · {KHORRAMI.units} units combined</div></div>
+          <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{KHORRAMI.location} · {memberNames} · {liveUnits} units combined</div></div>
       </div>
       <div style={{ display: "flex", gap: 7, marginBottom: 16 }}>
         {scopes.map((s) => (
