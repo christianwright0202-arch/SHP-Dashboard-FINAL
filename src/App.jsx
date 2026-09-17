@@ -1792,10 +1792,8 @@ function useMetricsState(d, alwaysYoy) {
 }
 
 function MetricsSquares({ d, accent, ctl }) {
-  const { period: rawPeriod, setPeriod, metric, setMetric, cmp, setCmp, canYoy } = ctl;
+  const { period, setPeriod, metric, setMetric, cmp, setCmp, canYoy } = ctl;
   const now = new Date();
-  // byUnit properties can't do the daily-based periods (no per-unit daily) — coerce away from them.
-  const period = (d.liveOnly && (rawPeriod === "mtdActual" || rawPeriod === "t365")) ? "mtd" : rawPeriod;
   const monthKeys = (d.series || []).map((s) => s.key);   // only months with data, sorted
   const curKey = mkey(now.getFullYear(), now.getMonth());  // "current" from TODAY, not max data year
   const selMonth = period.startsWith("m:") ? period.slice(2) : "";
@@ -1840,7 +1838,7 @@ function MetricsSquares({ d, accent, ctl }) {
     <div>
       {/* period control — drives these squares AND the linked chart below */}
       <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
-        {PERIOD_DEFS.filter((p) => !(d.liveOnly && (p.id === "mtdActual" || p.id === "t365"))).map((p) => pill(() => setPeriod(p.id), period === p.id, p.label, p.id))}
+        {PERIOD_DEFS.map((p) => pill(() => setPeriod(p.id), period === p.id, p.label, p.id))}
         {monthKeys.length > 0 && (
           <select value={selMonth} onChange={(e) => e.target.value && setPeriod("m:" + e.target.value)}
             style={{ fontSize: 12, fontWeight: 600, padding: "5px 8px", borderRadius: 7, cursor: "pointer", border: `1px solid ${selMonth ? accent : C.border}`, background: "#fff", color: selMonth ? accent : C.sub }}>
@@ -1861,14 +1859,14 @@ function MetricsSquares({ d, accent, ctl }) {
             <>Last 365 days · includes {d.trailing365.included.length} of {d.trailing365.included.length + d.trailing365.excluded.length} properties: {d.trailing365.included.join(", ")} · {d.trailing365.nights.toLocaleString()} nights. Occupancy/ADR/RevPAR need a 365-day availability sum and are not shown.{d.trailing365.excluded.length > 0 ? ` Excluded (insufficient history, need data back to ${d.trailing365.windowStart}): ${d.trailing365.excluded.map((e) => `${e.short} (earliest ${e.earliest || "none"})`).join(", ")}.` : ""}{d.hasLiveOnlyMember ? " Ryan/Kress include their offboarded units here — no per-unit daily data." : ""}</>
           ) : (
             d.trailing365.covered
-              ? `Last 365 days · ${d.trailing365.nights.toLocaleString()} nights. Occupancy, ADR and RevPAR need a 365-day availability sum and are not shown.`
+              ? `Last 365 days · ${d.trailing365.nights.toLocaleString()} nights. Occupancy, ADR and RevPAR need a 365-day availability sum and are not shown.${d.liveOnly ? " All units, incl. offboarded — no per-unit daily." : ""}`
               : `Insufficient history — needs data back to ${d.trailing365.windowStart} (earliest ${d.trailing365.earliest || "none"}).`
           )}
         </div>
       )}
 
-      {isMtdActual && d.hasLiveOnlyMember && (
-        <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginBottom: 12, lineHeight: 1.5 }}>MTD actual includes all units for Ryan/Kress — no per-unit daily data to filter.</div>
+      {isMtdActual && (d.hasLiveOnlyMember || d.liveOnly) && (
+        <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginBottom: 12, lineHeight: 1.5 }}>MTD actual uses property-level daily data — all units, incl. offboarded (no per-unit daily to filter).</div>
       )}
 
       {/* squares — click to drive the bar graph */}
@@ -2397,7 +2395,22 @@ function UnitBreakdown({ d, period }) {
   const [liveOnly, setLiveOnly] = useState(true);
   if (!byUnit) return null;
   const toKeys = (list) => list.map(({ year, mIdx }) => `${year}-${String(mIdx + 1).padStart(2, "0")}`);
-  const monthObjs = periodMonthList(period);
+  const now = new Date();
+  // byUnit is monthly, so the two daily periods are approximated at month grain and labeled.
+  let monthObjs, tableLabel, approxNote = "";
+  if (period === "t365") {
+    monthObjs = []; const b = new Date(now.getFullYear(), now.getMonth(), 1);
+    for (let i = 12; i >= 1; i--) { const dd = new Date(b.getFullYear(), b.getMonth() - i, 1); monthObjs.push({ year: dd.getFullYear(), mIdx: dd.getMonth() }); }
+    tableLabel = "Last 12 months";
+    approxNote = "Per-unit data is monthly — showing the last 12 whole months for the 365-day period.";
+  } else if (period === "mtdActual") {
+    monthObjs = [{ year: now.getFullYear(), mIdx: now.getMonth() }];
+    tableLabel = "Current month";
+    approxNote = "Per-unit data is monthly — showing the current month for MTD actual.";
+  } else {
+    monthObjs = periodMonthList(period);
+    tableLabel = period.startsWith("m:") ? monthKeyLabel(period.slice(2)) : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
+  }
   const curMonths = toKeys(monthObjs);
   const lyMonths = toKeys(shiftMonthsYear(monthObjs));
   const lyFirst = lyMonths[0];  // prior-year window's FIRST month
@@ -2420,7 +2433,6 @@ function UnitBreakdown({ d, period }) {
                   : rows.filter((r) => r.revenue > 0 || r.nights > 0); // all-units: activity-filtered
   rows.sort((a, b) => b.revenue - a.revenue);
 
-  const label = period.startsWith("m:") ? monthKeyLabel(period.slice(2)) : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
   const totRev = rows.reduce((s, r) => s + r.revenue, 0);
   const totNights = rows.reduce((s, r) => s + r.nights, 0);
   const baseRows = rows.filter((r) => r.lyRevenue != null);            // units with a real prior-year base
@@ -2436,7 +2448,7 @@ function UnitBreakdown({ d, period }) {
   );
 
   return (
-    <Panel title={`Per-unit breakdown — ${label}`} right={
+    <Panel title={`Per-unit breakdown — ${tableLabel}`} right={
       <div style={{ display: "flex", gap: 6 }}>
         {tog(liveOnly, "Live units only", () => setLiveOnly(true))}
         {tog(!liveOnly, "All units", () => setLiveOnly(false))}
@@ -2488,9 +2500,46 @@ function UnitBreakdown({ d, period }) {
               ? "Live units only: the same set of units live today, shown for both years. Offboarded units are excluded, so this total does not match the property's total revenue for the period."
               : "Units with no revenue or nights in this period are not listed."}
             {noBaseCount > 0 && ` Δ compares only the ${baseRows.length} unit${baseRows.length === 1 ? "" : "s"} with a full prior-year base; ${noBaseCount} newer unit${noBaseCount === 1 ? "" : "s"} show "—".`}
+            {approxNote ? ` ${approxNote}` : ""}
           </div>
         </>
       )}
+    </Panel>
+  );
+}
+// Per-unit monthly revenue + nights chart (Ryan & Kress), selectable by unit — for owner reports.
+function UnitTrendPanel({ d }) {
+  const byUnit = d.raw?.byUnit;
+  const [unit, setUnit] = useState("all");
+  if (!byUnit) return null;
+  const roster = (d.__model?.roster && d.__model.roster[d.pid]) || DEFAULT_ROSTER[d.pid] || { units: [] };
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const liveUnits = (roster.units || []).filter((u) => (!u.end || u.end >= todayISO) && byUnit[u.name]).map((u) => u.name);
+  const data = (unit !== "all" && byUnit[unit])
+    ? Object.keys(byUnit[unit]).filter((k) => !k.endsWith("-00")).sort().map((k) => { const [y, m] = k.split("-").map(Number); return { label: `${MONTHS[m - 1]} '${String(y).slice(2)}`, revenue: byUnit[unit][k].revenue || 0, nights: byUnit[unit][k].nights || 0 }; })
+    : [];
+  return (
+    <Panel title="Per-unit revenue & nights" right={
+      <select value={unit} onChange={(e) => setUnit(e.target.value)} style={{ fontSize: 12.5, fontWeight: 600, padding: "5px 8px", borderRadius: 7, cursor: "pointer", border: `1px solid ${unit !== "all" ? d.meta.color : C.border}`, background: "#fff", color: unit !== "all" ? d.meta.color : C.sub }}>
+        <option value="all">All units</option>
+        {liveUnits.map((n) => <option key={n} value={n}>{n}</option>)}
+      </select>}>
+      {unit === "all" ? <Empty text="Select a unit to see its monthly revenue and nights." />
+        : !data.length ? <Empty text="No monthly data for this unit." />
+        : (
+          <ResponsiveContainer width="100%" height={260}>
+            <ComposedChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+              <YAxis yAxisId="rev" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
+              <YAxis yAxisId="nights" orientation="right" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+              <Tooltip formatter={(v, n) => n === "Nights" ? v : fmtMoney(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar yAxisId="rev" dataKey="revenue" name="Revenue" fill={d.meta.color} radius={[4, 4, 0, 0]} />
+              <Line yAxisId="nights" dataKey="nights" name="Nights" stroke={C.ink} strokeWidth={2} dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
     </Panel>
   );
 }
@@ -2512,11 +2561,12 @@ function PropertyPage({ pid, model, setModel }) {
           {d.liveGaps.length ? ` No per-unit data for ${d.liveGaps.slice().sort().map(monthKeyLabel).join(", ")} — those months are omitted.` : ""}
         </div>
       )}
+      {d.raw?.byUnit && <div style={{ marginBottom: 16 }}><UnitTrendPanel d={d} /></div>}
       <MetricsSquares d={d} accent={meta.color} ctl={ctl} />
       <div style={{ marginTop: 16 }}>
         <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} — ${ctl.canYoy ? "year over year by month" : "by month"}`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
       </div>
-      {d.raw?.byUnit && ctl.period !== "mtdActual" && ctl.period !== "t365" && (
+      {d.raw?.byUnit && (
         <div style={{ marginTop: 16 }}><UnitBreakdown d={d} period={ctl.period} /></div>
       )}
       {d.snap && <div style={{ marginTop: 16 }}><AnnualSummary d={d} /></div>}
