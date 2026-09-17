@@ -908,6 +908,7 @@ function deriveCombined(memberIds, model, meta) {
   // MTD-actual for a combined view is the SUM of members' spans (revenue + nights + same-span
   // capacity) — never a fake __combined roster. A comparison span is null only if no member covers it.
   const mtdAcc = { current: { revenue: 0, nights: 0, avail: 0 }, yoy: null, mom: null, dayEnd: null, month: null, year: null };
+  const t365Acc = { revenue: 0, nights: 0, included: [], excluded: [], windowStart: null };
   const addSpan = (dst, src) => { dst.revenue += src.revenue || 0; dst.nights += src.nights || 0; dst.avail += src.avail || 0; };
   memberIds.forEach((mid) => {
     const dm = deriveProperty(mid, model); if (!dm) return;
@@ -925,11 +926,20 @@ function deriveCombined(memberIds, model, meta) {
       if (ma.yoy) { mtdAcc.yoy = mtdAcc.yoy || { revenue: 0, nights: 0, avail: 0 }; addSpan(mtdAcc.yoy, ma.yoy); }
       if (ma.mom) { mtdAcc.mom = mtdAcc.mom || { revenue: 0, nights: 0, avail: 0 }; addSpan(mtdAcc.mom, ma.mom); }
     }
+    const t = dm.trailing365;
+    if (t) {
+      t365Acc.windowStart = t.windowStart;
+      if (t.covered) { t365Acc.revenue += t.revenue || 0; t365Acc.nights += t.nights || 0; t365Acc.included.push(dm.meta.short); }
+      else t365Acc.excluded.push({ short: dm.meta.short, earliest: t.earliest });
+    }
   });
   const merged = { monthly, channelMonthly: {}, ota, otaByMonth, snapshot: null, availByMonth };
   const tempModel = { ...model, properties: { ...model.properties, __combined: merged } };
   const combined = deriveProperty("__combined", tempModel, meta);
-  if (combined) combined.mtdActual = mtdAcc;
+  if (combined) {
+    combined.mtdActual = mtdAcc;
+    combined.trailing365 = { revenue: t365Acc.revenue, nights: t365Acc.nights, covered: t365Acc.included.length > 0, windowStart: t365Acc.windowStart, included: t365Acc.included, excluded: t365Acc.excluded };
+  }
   return combined;
 }
 
@@ -939,6 +949,7 @@ const PERIOD_DEFS = [
   { id: "mtdActual", label: "MTD actual" },
   { id: "ytd", label: "YTD" },
   { id: "yem", label: "YTD thru last mo" },
+  { id: "t365", label: "Last 365 days" },
 ];
 function periodMonthList(periodId, now = new Date()) {
   const y = now.getFullYear(), m = now.getMonth();
@@ -1752,9 +1763,12 @@ function MetricsSquares({ d, accent, ctl }) {
 
   const statsByMetric = {};
   const isMtdActual = period === "mtdActual";
+  const isT365 = period === "t365";
   METRIC_DEFS.forEach((m) => {
     statsByMetric[m.id] = isMtdActual
       ? { value: spanMetricValue(d.mtdActual?.current, m.id), yoyValue: spanMetricValue(d.mtdActual?.yoy, m.id), momValue: spanMetricValue(d.mtdActual?.mom, m.id) }
+      : isT365
+      ? { value: (m.id === "revenue" && d.trailing365?.covered) ? d.trailing365.revenue : null, yoyValue: null, momValue: null }
       : periodStats(d, period, m.id, now);
   });
   const active = statsByMetric[metric];
@@ -1762,6 +1776,7 @@ function MetricsSquares({ d, accent, ctl }) {
 
   const periodTag = period.startsWith("m:") ? monthKeyLabel(selMonth)
     : (isMtdActual && d.mtdActual) ? `MTD actual · 1–${d.mtdActual.dayEnd} ${MONTHS[d.mtdActual.month]} ${d.mtdActual.year}`
+    : isT365 ? (d.trailing365?.included ? `Last 365 days · ${d.trailing365.included.length} of ${d.trailing365.included.length + d.trailing365.excluded.length}` : "Last 365 days")
     : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
   const cmpLabel = (mid) => {
     const st = statsByMetric[mid];
@@ -1801,6 +1816,18 @@ function MetricsSquares({ d, accent, ctl }) {
         </div>
       </div>
 
+      {isT365 && d.trailing365 && (
+        <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginBottom: 12, lineHeight: 1.5 }}>
+          {d.trailing365.included ? (
+            <>Last 365 days · includes {d.trailing365.included.length} of {d.trailing365.included.length + d.trailing365.excluded.length} properties: {d.trailing365.included.join(", ")} · {d.trailing365.nights.toLocaleString()} nights. Occupancy/ADR/RevPAR need a 365-day availability sum and are not shown.{d.trailing365.excluded.length > 0 ? ` Excluded (insufficient history, need data back to ${d.trailing365.windowStart}): ${d.trailing365.excluded.map((e) => `${e.short} (earliest ${e.earliest || "none"})`).join(", ")}.` : ""}</>
+          ) : (
+            d.trailing365.covered
+              ? `Last 365 days · ${d.trailing365.nights.toLocaleString()} nights. Occupancy, ADR and RevPAR need a 365-day availability sum and are not shown.`
+              : `Insufficient history — needs data back to ${d.trailing365.windowStart} (earliest ${d.trailing365.earliest || "none"}).`
+          )}
+        </div>
+      )}
+
       {/* squares — click to drive the bar graph */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 16 }}>
         {METRIC_DEFS.map((m) => {
@@ -1818,10 +1845,14 @@ function MetricsSquares({ d, accent, ctl }) {
                 return disc ? <div className="ui" style={{ fontSize: 10.5, color: "#b7791f", fontWeight: 600, marginTop: 3, lineHeight: 1.35 }}>⚠ RevPAR {fmtMoney(disc.headline)} · channel report {fmtMoney(disc.channel)}</div> : null;
               })()}
               <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 3 }}>{periodTag}</div>
-              <div className="ui" style={{ fontSize: 12, marginTop: 4 }}>
-                {c.dl != null ? <span style={{ color: c.dl >= 0 ? C.good : C.bad, fontWeight: 700 }}>{c.dl >= 0 ? "▲" : "▼"} {Math.abs(c.dl * 100).toFixed(1)}% {c.kind}</span> : <span style={{ color: C.faint }}>— {c.kind}</span>}
-                <span style={{ color: C.muted }}> · {c.vsText}</span>
-              </div>
+              {isT365 ? (
+                st.value == null && <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>not available for this period</div>
+              ) : (
+                <div className="ui" style={{ fontSize: 12, marginTop: 4 }}>
+                  {c.dl != null ? <span style={{ color: c.dl >= 0 ? C.good : C.bad, fontWeight: 700 }}>{c.dl >= 0 ? "▲" : "▼"} {Math.abs(c.dl * 100).toFixed(1)}% {c.kind}</span> : <span style={{ color: C.faint }}>— {c.kind}</span>}
+                  <span style={{ color: C.muted }}> · {c.vsText}</span>
+                </div>
+              )}
             </button>
           );
         })}
@@ -2351,22 +2382,57 @@ function AnnualBoard({ derived, goto }) {
   );
 }
 
-// Per-unit revenue/nights/ADR table, driven by the property's `byUnit` bucket (Ryan & Kress only).
-// Sums the selected monthly period; ADR = revenue / nights. No occupancy/RevPAR in v1.
+// Per-unit revenue/nights/ADR table (Ryan & Kress only), with a live-only toggle and a same-set
+// prior-year column. "Live" = stored-roster entry with no end date or an end >= today.
 function UnitBreakdown({ d, period }) {
   const byUnit = d.raw?.byUnit;
+  const [liveOnly, setLiveOnly] = useState(true);
   if (!byUnit) return null;
-  const months = periodMonthList(period).map(({ year, mIdx }) => `${year}-${String(mIdx + 1).padStart(2, "0")}`);
-  const rows = Object.entries(byUnit).map(([name, byMonth]) => {
-    let revenue = 0, nights = 0;
-    months.forEach((mk) => { const e = byMonth[mk]; if (e) { revenue += e.revenue || 0; nights += e.nights || 0; } });
-    return { name, revenue, nights, adr: nights ? revenue / nights : null };
-  }).filter((r) => r.revenue > 0 || r.nights > 0).sort((a, b) => b.revenue - a.revenue);
+  const toKeys = (list) => list.map(({ year, mIdx }) => `${year}-${String(mIdx + 1).padStart(2, "0")}`);
+  const monthObjs = periodMonthList(period);
+  const curMonths = toKeys(monthObjs);
+  const lyMonths = toKeys(shiftMonthsYear(monthObjs));
+  const lyFirst = lyMonths[0];  // prior-year window's FIRST month
+  const roster = (d.__model?.roster && d.__model.roster[d.pid]) || DEFAULT_ROSTER[d.pid];
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const liveNames = new Set((roster?.units || []).filter((u) => !u.end || u.end >= todayISO).map((u) => u.name));
+  const sum = (byMonth, keys) => { let revenue = 0, nights = 0; keys.forEach((mk) => { const e = byMonth[mk]; if (e) { revenue += e.revenue || 0; nights += e.nights || 0; } }); return { revenue, nights }; };
+
+  let rows = Object.entries(byUnit).map(([name, byMonth]) => {
+    const cur = sum(byMonth, curMonths);
+    const hasLyBase = byMonth[lyFirst] != null;            // prior-year present at window's first month
+    const ly = sum(byMonth, lyMonths);
+    return {
+      name, revenue: cur.revenue, nights: cur.nights, adr: cur.nights ? cur.revenue / cur.nights : null,
+      lyRevenue: hasLyBase ? ly.revenue : null,
+      delta: (hasLyBase && ly.revenue > 0) ? (cur.revenue - ly.revenue) / ly.revenue : null,
+    };
+  });
+  rows = liveOnly ? rows.filter((r) => liveNames.has(r.name))          // fixed live-today set (both years)
+                  : rows.filter((r) => r.revenue > 0 || r.nights > 0); // all-units: activity-filtered
+  rows.sort((a, b) => b.revenue - a.revenue);
+
   const label = period.startsWith("m:") ? monthKeyLabel(period.slice(2)) : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
   const totRev = rows.reduce((s, r) => s + r.revenue, 0);
   const totNights = rows.reduce((s, r) => s + r.nights, 0);
+  const baseRows = rows.filter((r) => r.lyRevenue != null);            // units with a real prior-year base
+  const totLy = baseRows.reduce((s, r) => s + r.lyRevenue, 0);
+  const totCurBase = baseRows.reduce((s, r) => s + r.revenue, 0);
+  const totDelta = totLy > 0 ? (totCurBase - totLy) / totLy : null;
+  const noBaseCount = rows.length - baseRows.length;
+
+  const dcell = (dl) => dl == null ? <span style={{ color: C.faint }}>—</span>
+    : <span style={{ color: dl >= 0 ? C.good : C.bad, fontWeight: 600 }}>{dl >= 0 ? "+" : ""}{(dl * 100).toFixed(0)}%</span>;
+  const tog = (on, lbl, oncl) => (
+    <button onClick={oncl} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${on ? d.meta.color : C.border}`, background: on ? d.meta.color : "#fff", color: on ? "#fff" : C.sub }}>{lbl}</button>
+  );
+
   return (
-    <Panel title={`Per-unit breakdown — ${label}`}>
+    <Panel title={`Per-unit breakdown — ${label}`} right={
+      <div style={{ display: "flex", gap: 6 }}>
+        {tog(liveOnly, "Live units only", () => setLiveOnly(true))}
+        {tog(!liveOnly, "All units", () => setLiveOnly(false))}
+      </div>}>
       {!rows.length ? <Empty text="No unit-level data for this period." /> : (
         <>
           <div style={{ overflowX: "auto" }}>
@@ -2377,6 +2443,8 @@ function UnitBreakdown({ d, period }) {
                   <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Revenue</th>
                   <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Nights</th>
                   <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>ADR</th>
+                  <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Rev LY</th>
+                  <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Δ</th>
                 </tr>
               </thead>
               <tbody>
@@ -2386,6 +2454,8 @@ function UnitBreakdown({ d, period }) {
                     <td style={{ padding: "6px 9px" }}>{fmtMoney(r.revenue)}</td>
                     <td style={{ padding: "6px 9px" }}>{r.nights}</td>
                     <td style={{ padding: "6px 9px" }}>{r.adr != null ? fmtMoney(r.adr) : "—"}</td>
+                    <td style={{ padding: "6px 9px", color: C.muted }}>{r.lyRevenue != null ? fmtMoney(r.lyRevenue) : "—"}</td>
+                    <td style={{ padding: "6px 9px" }}>{dcell(r.delta)}</td>
                   </tr>
                 ))}
                 <tr style={{ borderTop: `2px solid ${C.border}`, textAlign: "right", fontWeight: 700 }}>
@@ -2393,11 +2463,24 @@ function UnitBreakdown({ d, period }) {
                   <td style={{ padding: "8px 9px" }}>{fmtMoney(totRev)}</td>
                   <td style={{ padding: "8px 9px" }}>{totNights}</td>
                   <td style={{ padding: "8px 9px" }}>{totNights ? fmtMoney(totRev / totNights) : "—"}</td>
+                  <td style={{ padding: "8px 9px", color: C.muted }}>{totLy > 0 ? fmtMoney(totLy) : "—"}</td>
+                  <td style={{ padding: "8px 9px" }}>
+                    {totDelta == null ? <span style={{ color: C.faint }}>—</span> : (
+                      <span style={{ color: totDelta >= 0 ? C.good : C.bad, fontWeight: 700 }}>
+                        {totDelta >= 0 ? "+" : ""}{(totDelta * 100).toFixed(0)}%{noBaseCount > 0 ? ` (${baseRows.length} of ${rows.length})` : ""}
+                      </span>
+                    )}
+                  </td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 8 }}>Units with no revenue or nights in this period are not listed.</div>
+          <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
+            {liveOnly
+              ? "Live units only: the same set of units live today, shown for both years. Offboarded units are excluded, so this total does not match the property's total revenue for the period."
+              : "Units with no revenue or nights in this period are not listed."}
+            {noBaseCount > 0 && ` Δ compares only the ${baseRows.length} unit${baseRows.length === 1 ? "" : "s"} with a full prior-year base; ${noBaseCount} newer unit${noBaseCount === 1 ? "" : "s"} show "—".`}
+          </div>
         </>
       )}
     </Panel>
@@ -2419,7 +2502,7 @@ function PropertyPage({ pid, model, setModel }) {
       <div style={{ marginTop: 16 }}>
         <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} — ${ctl.canYoy ? "year over year by month" : "by month"}`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
       </div>
-      {d.raw?.byUnit && ctl.period !== "mtdActual" && (
+      {d.raw?.byUnit && ctl.period !== "mtdActual" && ctl.period !== "t365" && (
         <div style={{ marginTop: 16 }}><UnitBreakdown d={d} period={ctl.period} /></div>
       )}
       {d.snap && <div style={{ marginTop: 16 }}><AnnualSummary d={d} /></div>}
