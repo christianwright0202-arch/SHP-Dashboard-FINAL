@@ -887,7 +887,16 @@ function deriveProperty(pid, model, metaOverride) {
     dayEnd: tDay, month: tM, year: tY,
   };
 
-  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, resStats: p.resStats || {}, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, mtdActual, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+  // Trailing 365 days (rolling window ending today), from the daily bucket. `covered` is true only
+  // when the property's daily history reaches the window start — otherwise the Overview suppresses it.
+  const winD = new Date(tY, tM, tDay); winD.setDate(winD.getDate() - 364);  // 365 days inclusive
+  const winKey = `${winD.getFullYear()}-${String(winD.getMonth() + 1).padStart(2, "0")}-${String(winD.getDate()).padStart(2, "0")}`;
+  const todayKey = `${tY}-${String(tM + 1).padStart(2, "0")}-${String(tDay).padStart(2, "0")}`;
+  let t365rev = 0, t365nights = 0;
+  for (const [k, e] of Object.entries(daily)) { if (e && k >= winKey && k <= todayKey) { t365rev += e.revenue || 0; t365nights += e.nights || 0; } }
+  const trailing365 = { revenue: t365rev, nights: t365nights, covered: minDailyKey != null && minDailyKey <= winKey, earliest: minDailyKey, windowStart: winKey };
+
+  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, resStats: p.resStats || {}, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, mtdActual, trailing365, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
 }
 // Combine several properties into one derived object (Khorrami "All", or the whole portfolio).
 // Pools correctly: sums revenue + nights per month, then recomputes occ/ADR/RevPAR against the
@@ -1866,6 +1875,40 @@ function PropertyBars({ derived, ctl, accent }) {
   );
 }
 
+// Rolling 365-day portfolio total from the daily buckets. Sums ONLY fully-covered properties and
+// names them; lists the excluded ones with the date their coverage must reach and their earliest date.
+function Trailing365Block({ derived }) {
+  const covered = derived.filter((d) => d.trailing365?.covered);
+  const excluded = derived.filter((d) => !d.trailing365?.covered);
+  const winKey = derived[0]?.trailing365?.windowStart;
+  const totRev = covered.reduce((s, d) => s + (d.trailing365.revenue || 0), 0);
+  const totNights = covered.reduce((s, d) => s + (d.trailing365.nights || 0), 0);
+  return (
+    <Panel title="Last 365 days">
+      {!covered.length ? (
+        <Empty text="No property has a full 365 days of daily data yet." />
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+            <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>Revenue</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700 }}>{fmtMoney(totRev)}</div></div>
+            <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>Nights</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700 }}>{totNights.toLocaleString()}</div></div>
+          </div>
+          <div className="ui" style={{ fontSize: 12, color: C.sub, marginTop: 10 }}>
+            Includes {covered.length} of {derived.length} properties: {covered.map((d) => d.meta.short).join(", ")}.
+          </div>
+        </>
+      )}
+      {excluded.length > 0 && (
+        <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 10, borderTop: `1px solid ${C.border}`, paddingTop: 8 }}>
+          <div style={{ fontWeight: 700, color: C.sub, marginBottom: 4 }}>Not yet 365 days (excluded):</div>
+          {excluded.map((d) => (
+            <div key={d.pid}>{d.meta.short} — needs data back to {winKey}; earliest {d.trailing365?.earliest || "none"}</div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
 function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUpload, channelTitle, regionMode }) {
   const propIds = props.map((p) => p.id);
   const derived = useMemo(() => props.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model, propIds.join()]);
@@ -1922,6 +1965,8 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
       )}
 
       <MetricsSquares d={portfolioDerived} accent={accent} ctl={ctl} />
+
+      {!regionMode && <div style={{ marginTop: 16 }}><Trailing365Block derived={derived} /></div>}
 
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
         <PropertyBars derived={derived} ctl={ctl} accent={accent} />
@@ -2306,6 +2351,58 @@ function AnnualBoard({ derived, goto }) {
   );
 }
 
+// Per-unit revenue/nights/ADR table, driven by the property's `byUnit` bucket (Ryan & Kress only).
+// Sums the selected monthly period; ADR = revenue / nights. No occupancy/RevPAR in v1.
+function UnitBreakdown({ d, period }) {
+  const byUnit = d.raw?.byUnit;
+  if (!byUnit) return null;
+  const months = periodMonthList(period).map(({ year, mIdx }) => `${year}-${String(mIdx + 1).padStart(2, "0")}`);
+  const rows = Object.entries(byUnit).map(([name, byMonth]) => {
+    let revenue = 0, nights = 0;
+    months.forEach((mk) => { const e = byMonth[mk]; if (e) { revenue += e.revenue || 0; nights += e.nights || 0; } });
+    return { name, revenue, nights, adr: nights ? revenue / nights : null };
+  }).filter((r) => r.revenue > 0 || r.nights > 0).sort((a, b) => b.revenue - a.revenue);
+  const label = period.startsWith("m:") ? monthKeyLabel(period.slice(2)) : (PERIOD_DEFS.find((p) => p.id === period)?.label || "");
+  const totRev = rows.reduce((s, r) => s + r.revenue, 0);
+  const totNights = rows.reduce((s, r) => s + r.nights, 0);
+  return (
+    <Panel title={`Per-unit breakdown — ${label}`}>
+      {!rows.length ? <Empty text="No unit-level data for this period." /> : (
+        <>
+          <div style={{ overflowX: "auto" }}>
+            <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, whiteSpace: "nowrap" }}>
+              <thead>
+                <tr style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .3, textAlign: "right" }}>
+                  <th style={{ padding: "7px 9px", textAlign: "left", borderBottom: `2px solid ${C.border}` }}>Unit</th>
+                  <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Revenue</th>
+                  <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>Nights</th>
+                  <th style={{ padding: "7px 9px", borderBottom: `2px solid ${C.border}` }}>ADR</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.name} style={{ borderBottom: `1px solid ${C.track}`, textAlign: "right" }}>
+                    <td style={{ padding: "6px 9px", textAlign: "left", fontWeight: 600 }}>{r.name}</td>
+                    <td style={{ padding: "6px 9px" }}>{fmtMoney(r.revenue)}</td>
+                    <td style={{ padding: "6px 9px" }}>{r.nights}</td>
+                    <td style={{ padding: "6px 9px" }}>{r.adr != null ? fmtMoney(r.adr) : "—"}</td>
+                  </tr>
+                ))}
+                <tr style={{ borderTop: `2px solid ${C.border}`, textAlign: "right", fontWeight: 700 }}>
+                  <td style={{ padding: "8px 9px", textAlign: "left" }}>Total</td>
+                  <td style={{ padding: "8px 9px" }}>{fmtMoney(totRev)}</td>
+                  <td style={{ padding: "8px 9px" }}>{totNights}</td>
+                  <td style={{ padding: "8px 9px" }}>{totNights ? fmtMoney(totRev / totNights) : "—"}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 8 }}>Units with no revenue or nights in this period are not listed.</div>
+        </>
+      )}
+    </Panel>
+  );
+}
 function PropertyPage({ pid, model, setModel }) {
   const d = useMemo(() => deriveProperty(pid, model), [pid, model]);
   const ctl = useMetricsState(d, false); // YoY only if this property has a full prior year
@@ -2322,6 +2419,9 @@ function PropertyPage({ pid, model, setModel }) {
       <div style={{ marginTop: 16 }}>
         <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} — ${ctl.canYoy ? "year over year by month" : "by month"}`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
       </div>
+      {d.raw?.byUnit && ctl.period !== "mtdActual" && (
+        <div style={{ marginTop: 16 }}><UnitBreakdown d={d} period={ctl.period} /></div>
+      )}
       {d.snap && <div style={{ marginTop: 16 }}><AnnualSummary d={d} /></div>}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
         <GoalTracker d={d} model={model} setModel={setModel} />
