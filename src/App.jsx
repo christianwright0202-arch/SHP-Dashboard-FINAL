@@ -158,7 +158,7 @@ const DEFAULT_ROSTER = {
 };
 const parseISO = (s) => { if (!s) return null; const [y, m, d] = String(s).split("-").map(Number); return new Date(y, (m || 1) - 1, d || 1); };
 // Available unit-NIGHTS for one property in one month, counted day by day.
-function availUnitNights(pid, year, mIdx, model) {
+function availUnitNights(pid, year, mIdx, model, filterNames) {
   const r = (model && model.roster && model.roster[pid]) || DEFAULT_ROSTER[pid];
   const days = daysInMonth(year, mIdx);
   if (!r) { const u = PROP_BY_ID[pid]?.units || 0; return u * days; }
@@ -166,6 +166,7 @@ function availUnitNights(pid, year, mIdx, model) {
   let total = 0;
   const mStart = new Date(year, mIdx, 1), mEnd = new Date(year, mIdx, days);
   (r.units || []).forEach((u) => {
+    if (filterNames && !filterNames.has(u.name)) return;
     const s = parseISO(u.start) || new Date(1900, 0, 1);
     const e = parseISO(u.end) || new Date(2999, 11, 31);
     const from = s > mStart ? s : mStart, to = e < mEnd ? e : mEnd;
@@ -175,7 +176,7 @@ function availUnitNights(pid, year, mIdx, model) {
 }
 // Available unit-nights for a DAY RANGE [fromDay, toDay] within one month (roster-aware).
 // Used by the month-end forecast for "capacity remaining from tomorrow to month end".
-function availUnitNightsRange(pid, year, mIdx, fromDay, toDay, model) {
+function availUnitNightsRange(pid, year, mIdx, fromDay, toDay, model, filterNames) {
   const days = daysInMonth(year, mIdx);
   const lo = Math.max(1, fromDay), hi = Math.min(days, toDay);
   if (hi < lo) return 0;
@@ -186,6 +187,7 @@ function availUnitNightsRange(pid, year, mIdx, fromDay, toDay, model) {
   let total = 0;
   const wStart = new Date(year, mIdx, lo), wEnd = new Date(year, mIdx, hi);
   (r.units || []).forEach((u) => {
+    if (filterNames && !filterNames.has(u.name)) return;
     const s = parseISO(u.start) || new Date(1900, 0, 1);
     const e = parseISO(u.end) || new Date(2999, 11, 31);
     const from = s > wStart ? s : wStart, to = e < wEnd ? e : wEnd;
@@ -746,27 +748,54 @@ function deriveProperty(pid, model, metaOverride) {
   // Headline revenue/nights come from RevPAR or whole-portfolio (p.monthly). Channel-production/STR
   // reservation data (p.channelMonthly) is ONLY a fallback for months with no headline source — it
   // must never stack on top of or overwrite the authoritative RevPAR figure.
-  const headline = p.monthly || {};
-  const chan = p.channelMonthly || {};
+  // Live-units-only: properties with a per-unit bucket (Ryan & Kress) derive ALL monthly figures
+  // from the units live today, both years. Everyone else uses the headline/channel merge unchanged.
+  const liveOnly = !!p.byUnit;
+  const roster = (model.roster && model.roster[pid]) || DEFAULT_ROSTER[pid] || { units: [] };
+  const liveNames = liveOnly ? new Set((roster.units || [])
+    .filter((u) => !u.end || u.end >= new Date().toISOString().slice(0, 10)).map((u) => u.name)) : null;
+  const liveUnitCount = liveOnly ? liveNames.size : 0;
+  const totalUnitCount = liveOnly ? (roster.units || []).length : 0;
   const monthly = {};
   const revDisc = {}; // months where RevPAR headline and channel-report revenue disagree materially
-  for (const k of new Set([...Object.keys(headline), ...Object.keys(chan)])) {
-    if (k in headline) {
-      monthly[k] = headline[k];      // RevPAR/whole-portfolio is authoritative — even a real $0
-      // If a channel report ALSO covers this month, note any material disagreement (>2% and >$100)
-      if (chan[k] && chan[k].revenue != null) {
-        const hv = headline[k].revenue || 0, cv = chan[k].revenue || 0;
-        if (Math.abs(hv - cv) > 100 && (hv === 0 || Math.abs(hv - cv) / Math.abs(hv) > 0.02)) revDisc[k] = { headline: hv, channel: cv };
+  const liveGaps = [];
+  if (liveOnly) {
+    for (const [name, byMonth] of Object.entries(p.byUnit)) {
+      if (!liveNames.has(name)) continue;
+      for (const [mk, e] of Object.entries(byMonth)) {
+        const cur = (monthly[mk] = monthly[mk] || { revenue: 0, nights: 0 });
+        cur.revenue += e.revenue || 0; cur.nights += e.nights || 0;
       }
     }
-    else monthly[k] = { revenue: chan[k].revenue || 0, nights: chan[k].nights || 0 }; // channel only fills months with no headline source
+    // Data-gap guard: a month the property earned (p.monthly) but byUnit doesn't cover at all →
+    // flag it rather than letting the chart render a misleading $0.
+    const anyUnitMonths = new Set();
+    for (const bm of Object.values(p.byUnit)) for (const mk of Object.keys(bm)) anyUnitMonths.add(mk);
+    for (const [mk, mv] of Object.entries(p.monthly || {})) {
+      if (!mk.endsWith("-00") && (mv.revenue || mv.nights) && !anyUnitMonths.has(mk)) liveGaps.push(mk);
+    }
+  } else {
+    const headline = p.monthly || {};
+    const chan = p.channelMonthly || {};
+    for (const k of new Set([...Object.keys(headline), ...Object.keys(chan)])) {
+      if (k in headline) {
+        monthly[k] = headline[k];      // RevPAR/whole-portfolio is authoritative — even a real $0
+        // If a channel report ALSO covers this month, note any material disagreement (>2% and >$100)
+        if (chan[k] && chan[k].revenue != null) {
+          const hv = headline[k].revenue || 0, cv = chan[k].revenue || 0;
+          if (Math.abs(hv - cv) > 100 && (hv === 0 || Math.abs(hv - cv) / Math.abs(hv) > 0.02)) revDisc[k] = { headline: hv, channel: cv };
+        }
+      }
+      else monthly[k] = { revenue: chan[k].revenue || 0, nights: chan[k].nights || 0 }; // channel only fills months with no headline source
+    }
   }
   const keys = Object.keys(monthly).filter((k) => !k.endsWith("-00")).sort();
   const series = keys.map((k) => {
     const [y, m] = k.split("-").map(Number);
     const d = monthly[k];
     const days = daysInMonth(y, m - 1);
-    const avail = (p.availByMonth && p.availByMonth[k] != null) ? p.availByMonth[k] : availUnitNights(pid, y, m - 1, model);
+    const avail = liveOnly ? availUnitNights(pid, y, m - 1, model, liveNames)
+      : (p.availByMonth && p.availByMonth[k] != null) ? p.availByMonth[k] : availUnitNights(pid, y, m - 1, model);
     const rawOcc = d.suspect ? null : (d.occ != null ? d.occ : d.nights && avail ? d.nights / avail : null);
     const occ = rawOcc; // NOT clamped — an impossible value must be visible, not hidden
     const overbooked = rawOcc != null && rawOcc > 1.0001;
@@ -852,8 +881,8 @@ function deriveProperty(pid, model, metaOverride) {
     const smly = series.find((s) => s.year === fcY - 1 && s.mIdx === fcM && s.occ != null);
     if (smly) { occHist = smly.occ; occWindow = `${MONTHS[fcM]} ${fcY - 1} occ`; }
   }
-  const availMonth = availUnitNights(pid, fcY, fcM, model);
-  const availRemaining = availUnitNightsRange(pid, fcY, fcM, dayOfMonth + 1, dim, model);
+  const availMonth = availUnitNights(pid, fcY, fcM, model, liveNames);
+  const availRemaining = availUnitNightsRange(pid, fcY, fcM, dayOfMonth + 1, dim, model, liveNames);
   const bookedNights = currentMonth.nights || 0;
   const adrCurrent = currentMonth.adr;  // this month's actual ADR to date
   let projection = onBooks, projected = false;
@@ -896,7 +925,7 @@ function deriveProperty(pid, model, metaOverride) {
   for (const [k, e] of Object.entries(daily)) { if (e && k >= winKey && k <= todayKey) { t365rev += e.revenue || 0; t365nights += e.nights || 0; } }
   const trailing365 = { revenue: t365rev, nights: t365nights, covered: minDailyKey != null && minDailyKey <= winKey, earliest: minDailyKey, windowStart: winKey };
 
-  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, resStats: p.resStats || {}, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, mtdActual, trailing365, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
+  return { pid, meta, series, latest, prev, snap, yoy, byYear, years, curY, priorY, ota, raw: p, __model: model, revDisc, resStats: p.resStats || {}, currentMonth, ytd, ytdPrior, ytdYear: thisYear, forecast, otaByMonth, goal, mtdActual, trailing365, liveOnly, liveUnitCount, totalUnitCount, liveGaps, pace: p.pace ? { ...p.pace, bookingWindow: p.pace.bwN ? p.pace.bwSum / p.pace.bwN : null } : null };
 }
 // Combine several properties into one derived object (Khorrami "All", or the whole portfolio).
 // Pools correctly: sums revenue + nights per month, then recomputes occ/ADR/RevPAR against the
@@ -909,6 +938,7 @@ function deriveCombined(memberIds, model, meta) {
   // capacity) — never a fake __combined roster. A comparison span is null only if no member covers it.
   const mtdAcc = { current: { revenue: 0, nights: 0, avail: 0 }, yoy: null, mom: null, dayEnd: null, month: null, year: null };
   const t365Acc = { revenue: 0, nights: 0, included: [], excluded: [], windowStart: null };
+  let hasLiveOnly = false;
   const addSpan = (dst, src) => { dst.revenue += src.revenue || 0; dst.nights += src.nights || 0; dst.avail += src.avail || 0; };
   memberIds.forEach((mid) => {
     const dm = deriveProperty(mid, model); if (!dm) return;
@@ -926,6 +956,7 @@ function deriveCombined(memberIds, model, meta) {
       if (ma.yoy) { mtdAcc.yoy = mtdAcc.yoy || { revenue: 0, nights: 0, avail: 0 }; addSpan(mtdAcc.yoy, ma.yoy); }
       if (ma.mom) { mtdAcc.mom = mtdAcc.mom || { revenue: 0, nights: 0, avail: 0 }; addSpan(mtdAcc.mom, ma.mom); }
     }
+    if (dm.liveOnly) hasLiveOnly = true;
     const t = dm.trailing365;
     if (t) {
       t365Acc.windowStart = t.windowStart;
@@ -939,6 +970,7 @@ function deriveCombined(memberIds, model, meta) {
   if (combined) {
     combined.mtdActual = mtdAcc;
     combined.trailing365 = { revenue: t365Acc.revenue, nights: t365Acc.nights, covered: t365Acc.included.length > 0, windowStart: t365Acc.windowStart, included: t365Acc.included, excluded: t365Acc.excluded };
+    combined.hasLiveOnlyMember = hasLiveOnly;
   }
   return combined;
 }
@@ -1639,6 +1671,10 @@ const CHANNEL_COST = { "Airbnb": 0.155, "Booking.com": 0.22, "Expedia": 0.18, "V
 const DEFAULT_BUDGETS = {
   soma: { "2026-05": 55814.30, "2026-06": 80000, "2026-07": 100000, "2026-08": 100000, "2026-09": 150000, "2026-10": 170000, "2026-11": 180000, "2026-12": 180000 },
 };
+// Shown on live-only property pages (Ryan/Kress) for panels that have no per-unit split.
+function AllUnitsNote() {
+  return <div className="ui" style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>All units, incl. offboarded — no per-unit breakdown for this panel.</div>;
+}
 function OtaChart({ d }) {
   const obm = d?.otaByMonth || {};
   const monthKeys = Object.keys(obm).filter((k) => Object.values(obm[k] || {}).some((v) => v > 0)).sort();
@@ -1674,6 +1710,7 @@ function OtaChart({ d }) {
   if (!hasAnyMonth && !total) return <Empty text="Channel mix appears once channel/reservation data (with a source column) is loaded. All five channels will populate here." />;
   return (
     <div>
+      {d?.liveOnly && <AllUnitsNote />}
       {selector}
       {!total ? (
         <Empty text={`No channel bookings on the books for ${scope === "all" ? "any period" : mLabel(scope)} yet. Switch the period above.`} />
@@ -1755,8 +1792,10 @@ function useMetricsState(d, alwaysYoy) {
 }
 
 function MetricsSquares({ d, accent, ctl }) {
-  const { period, setPeriod, metric, setMetric, cmp, setCmp, canYoy } = ctl;
+  const { period: rawPeriod, setPeriod, metric, setMetric, cmp, setCmp, canYoy } = ctl;
   const now = new Date();
+  // byUnit properties can't do the daily-based periods (no per-unit daily) — coerce away from them.
+  const period = (d.liveOnly && (rawPeriod === "mtdActual" || rawPeriod === "t365")) ? "mtd" : rawPeriod;
   const monthKeys = (d.series || []).map((s) => s.key);   // only months with data, sorted
   const curKey = mkey(now.getFullYear(), now.getMonth());  // "current" from TODAY, not max data year
   const selMonth = period.startsWith("m:") ? period.slice(2) : "";
@@ -1801,7 +1840,7 @@ function MetricsSquares({ d, accent, ctl }) {
     <div>
       {/* period control — drives these squares AND the linked chart below */}
       <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
-        {PERIOD_DEFS.map((p) => pill(() => setPeriod(p.id), period === p.id, p.label, p.id))}
+        {PERIOD_DEFS.filter((p) => !(d.liveOnly && (p.id === "mtdActual" || p.id === "t365"))).map((p) => pill(() => setPeriod(p.id), period === p.id, p.label, p.id))}
         {monthKeys.length > 0 && (
           <select value={selMonth} onChange={(e) => e.target.value && setPeriod("m:" + e.target.value)}
             style={{ fontSize: 12, fontWeight: 600, padding: "5px 8px", borderRadius: 7, cursor: "pointer", border: `1px solid ${selMonth ? accent : C.border}`, background: "#fff", color: selMonth ? accent : C.sub }}>
@@ -1819,13 +1858,17 @@ function MetricsSquares({ d, accent, ctl }) {
       {isT365 && d.trailing365 && (
         <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginBottom: 12, lineHeight: 1.5 }}>
           {d.trailing365.included ? (
-            <>Last 365 days · includes {d.trailing365.included.length} of {d.trailing365.included.length + d.trailing365.excluded.length} properties: {d.trailing365.included.join(", ")} · {d.trailing365.nights.toLocaleString()} nights. Occupancy/ADR/RevPAR need a 365-day availability sum and are not shown.{d.trailing365.excluded.length > 0 ? ` Excluded (insufficient history, need data back to ${d.trailing365.windowStart}): ${d.trailing365.excluded.map((e) => `${e.short} (earliest ${e.earliest || "none"})`).join(", ")}.` : ""}</>
+            <>Last 365 days · includes {d.trailing365.included.length} of {d.trailing365.included.length + d.trailing365.excluded.length} properties: {d.trailing365.included.join(", ")} · {d.trailing365.nights.toLocaleString()} nights. Occupancy/ADR/RevPAR need a 365-day availability sum and are not shown.{d.trailing365.excluded.length > 0 ? ` Excluded (insufficient history, need data back to ${d.trailing365.windowStart}): ${d.trailing365.excluded.map((e) => `${e.short} (earliest ${e.earliest || "none"})`).join(", ")}.` : ""}{d.hasLiveOnlyMember ? " Ryan/Kress include their offboarded units here — no per-unit daily data." : ""}</>
           ) : (
             d.trailing365.covered
               ? `Last 365 days · ${d.trailing365.nights.toLocaleString()} nights. Occupancy, ADR and RevPAR need a 365-day availability sum and are not shown.`
               : `Insufficient history — needs data back to ${d.trailing365.windowStart} (earliest ${d.trailing365.earliest || "none"}).`
           )}
         </div>
+      )}
+
+      {isMtdActual && d.hasLiveOnlyMember && (
+        <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginBottom: 12, lineHeight: 1.5 }}>MTD actual includes all units for Ryan/Kress — no per-unit daily data to filter.</div>
       )}
 
       {/* squares — click to drive the bar graph */}
@@ -1906,40 +1949,6 @@ function PropertyBars({ derived, ctl, accent }) {
   );
 }
 
-// Rolling 365-day portfolio total from the daily buckets. Sums ONLY fully-covered properties and
-// names them; lists the excluded ones with the date their coverage must reach and their earliest date.
-function Trailing365Block({ derived }) {
-  const covered = derived.filter((d) => d.trailing365?.covered);
-  const excluded = derived.filter((d) => !d.trailing365?.covered);
-  const winKey = derived[0]?.trailing365?.windowStart;
-  const totRev = covered.reduce((s, d) => s + (d.trailing365.revenue || 0), 0);
-  const totNights = covered.reduce((s, d) => s + (d.trailing365.nights || 0), 0);
-  return (
-    <Panel title="Last 365 days">
-      {!covered.length ? (
-        <Empty text="No property has a full 365 days of daily data yet." />
-      ) : (
-        <>
-          <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
-            <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>Revenue</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700 }}>{fmtMoney(totRev)}</div></div>
-            <div><div className="ui" style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .4, fontWeight: 700 }}>Nights</div><div style={{ fontFamily: "Georgia,serif", fontSize: 25, fontWeight: 700 }}>{totNights.toLocaleString()}</div></div>
-          </div>
-          <div className="ui" style={{ fontSize: 12, color: C.sub, marginTop: 10 }}>
-            Includes {covered.length} of {derived.length} properties: {covered.map((d) => d.meta.short).join(", ")}.
-          </div>
-        </>
-      )}
-      {excluded.length > 0 && (
-        <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 10, borderTop: `1px solid ${C.border}`, paddingTop: 8 }}>
-          <div style={{ fontWeight: 700, color: C.sub, marginBottom: 4 }}>Not yet 365 days (excluded):</div>
-          {excluded.map((d) => (
-            <div key={d.pid}>{d.meta.short} — needs data back to {winKey}; earliest {d.trailing365?.earliest || "none"}</div>
-          ))}
-        </div>
-      )}
-    </Panel>
-  );
-}
 function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUpload, channelTitle, regionMode }) {
   const propIds = props.map((p) => p.id);
   const derived = useMemo(() => props.map((p) => deriveProperty(p.id, model)).filter(Boolean), [model, propIds.join()]);
@@ -1996,8 +2005,6 @@ function PortfolioView({ model, props, title, sub, accent, goto, hasData, onUplo
       )}
 
       <MetricsSquares d={portfolioDerived} accent={accent} ctl={ctl} />
-
-      {!regionMode && <div style={{ marginTop: 16 }}><Trailing365Block derived={derived} /></div>}
 
       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
         <PropertyBars derived={derived} ctl={ctl} accent={accent} />
@@ -2321,6 +2328,7 @@ function AnnualSummary({ d }) {
   if (!a) return null;
   return (
     <Panel title={`Annual report — ${a.year}`} right={a.yoy != null ? <span className="ui" style={{ fontSize: 13, fontWeight: 700, color: a.yoy >= 0 ? C.good : C.bad, display: "flex", alignItems: "center", gap: 4 }}>{a.yoy >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />}{(a.yoy * 100).toFixed(1)}% YoY</span> : null}>
+      {d?.liveOnly && <AllUnitsNote />}
       <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
         <Mini label={`Revenue ${a.year}`} val={fmtMoney(a.revenue)} />
         <Mini label={`Revenue ${a.year - 1}`} val={a.revenueLY ? fmtMoney(a.revenueLY) : "—"} />
@@ -2498,6 +2506,12 @@ function PropertyPage({ pid, model, setModel }) {
         <div><h1 style={{ fontFamily: "Georgia,serif", fontSize: 28, fontWeight: 700, margin: 0 }}>{meta.name}</h1>
           <div className="ui" style={{ color: C.muted, fontSize: 13.5 }}>{meta.location} · {unitsActive(pid, new Date().getFullYear(), new Date().getMonth(), model)} units · latest {d.latest?.label || "—"}</div></div>
       </div>
+      {d.liveOnly && (
+        <div className="ui" style={{ marginBottom: 16, padding: "9px 12px", borderRadius: 9, background: "#f4f6f8", border: `1px solid ${C.border}`, fontSize: 12.5, color: C.sub, lineHeight: 1.5 }}>
+          Figures cover only the {d.liveUnitCount} unit{d.liveUnitCount === 1 ? "" : "s"} currently managed{d.totalUnitCount > d.liveUnitCount ? ` (${d.totalUnitCount - d.liveUnitCount} offboarded excluded)` : ""}, both years on the same set. Panels below without a per-unit breakdown are marked "all units".
+          {d.liveGaps.length ? ` No per-unit data for ${d.liveGaps.slice().sort().map(monthKeyLabel).join(", ")} — those months are omitted.` : ""}
+        </div>
+      )}
       <MetricsSquares d={d} accent={meta.color} ctl={ctl} />
       <div style={{ marginTop: 16 }}>
         <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} — ${ctl.canYoy ? "year over year by month" : "by month"}`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
@@ -2896,6 +2910,7 @@ function StayPatternsPanel({ d }) {
   const avgLead = agg.leadN ? agg.leadSum / agg.leadN : null;
   return (
     <Panel title="Booking window & length of stay">
+      {d?.liveOnly && <AllUnitsNote />}
       <div className="ui" style={{ display: "flex", gap: 22, marginBottom: 12, flexWrap: "wrap" }}>
         <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Avg stay</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{avgLos != null ? avgLos.toFixed(1) + " nights" : "—"}</div></div>
         <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Avg booking window</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{avgLead != null ? Math.round(avgLead) + " days" : "—"}</div></div>
@@ -2950,6 +2965,7 @@ function PickupPanel({ d }) {
   const dl = (ly && totalLy) ? (totalCur - totalLy) / totalLy : null;
   return (
     <Panel title={`Pace & pickup — ${MONTHS[now.getMonth()]} ${now.getFullYear()}`}>
+      {d?.liveOnly && <AllUnitsNote />}
       <div className="ui" style={{ fontSize: 12.5, color: C.sub, marginBottom: 10 }}>
         Nights on the books, accumulating from the earliest bookings to the latest.
         {ly ? <> Same month last year for comparison — <b style={{ color: dl >= 0 ? C.good : C.bad }}>{dl != null ? (dl >= 0 ? "▲ " : "▼ ") + Math.abs(dl * 100).toFixed(0) + "%" : "—"}</b> vs last year.</> : " No prior-year data for this month yet."}
@@ -2992,6 +3008,7 @@ function ChannelProfitPanel({ d }) {
   if (!rows.length) return <Panel title="Channel profitability"><Empty text="Needs channel mix data." /></Panel>;
   return (
     <Panel title="Channel profitability — net of commission">
+      {d?.liveOnly && <AllUnitsNote />}
       <div className="ui" style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
         <button onClick={() => setScope(monthKeys.includes(curKey) ? curKey : monthKeys[monthKeys.length - 1])} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${scope !== "all" ? accent : C.border}`, background: scope !== "all" ? accent : "#fff", color: scope !== "all" ? "#fff" : C.sub }}>By month</button>
         <button onClick={() => setScope("all")} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${scope === "all" ? accent : C.border}`, background: scope === "all" ? accent : "#fff", color: scope === "all" ? "#fff" : C.sub }}>All time</button>
