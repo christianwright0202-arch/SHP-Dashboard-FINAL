@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis,
-  CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, AreaChart, ReferenceLine,
+  CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, AreaChart, ReferenceLine, LabelList,
 } from "recharts";
 import * as XLSX from "xlsx";
 import { loadModel, saveModel, modelHasData, listBackups, restoreBackup } from "./storage";
@@ -1115,6 +1115,25 @@ function deriveWorldCup(model, propIds) {
 
 function fmtMoney(v, d = 0) { if (v == null) return "—"; return "$" + Number(v).toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d }); }
 function fmtPct(v) { if (v == null) return "—"; return (v * 100).toFixed(1) + "%"; }
+// Compact per-bar value label (full precision stays in the tooltip).
+function fmtBarLabel(metric, v) {
+  if (v == null) return "";
+  if (metric === "occ") return Math.round(v * 100) + "%";
+  if (metric === "count") return String(Math.round(v));
+  if (metric === "revenue") { const a = Math.abs(v); return a >= 1000 ? "$" + (v / 1000).toFixed(a >= 10000 ? 0 : 1) + "k" : "$" + Math.round(v); }
+  return "$" + Math.round(v); // adr / revpar
+}
+// Two-line X-axis tick: category on top, the bar's value beneath it (prints as SVG text).
+function ValueTick({ x, y, payload, data, valueKey, metric }) {
+  const row = data && data[payload.index];
+  const v = row ? row[valueKey] : null;
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text x={0} y={0} dy={12} textAnchor="middle" fontSize={10.5} fill={C.muted}>{payload.value}</text>
+      {v != null && <text x={0} y={0} dy={24} textAnchor="middle" fontSize={9.5} fontWeight={700} fill={C.ink}>{fmtBarLabel(metric, v)}</text>}
+    </g>
+  );
+}
 function delta(cur, prev) { if (cur == null || prev == null || prev === 0) return null; return (cur - prev) / Math.abs(prev); }
 
 /* ---------------- Claude API ---------------- */
@@ -1455,9 +1474,11 @@ function Dashboard() {
             </button>
             <style>{`@keyframes spin{to{transform:rotate(360deg)}}
               @page { size: letter portrait; margin: 0.45in; }
+              .print-only { display: none; }
 
               @media print {
                 .no-print, nav, aside { display: none !important; }
+                .print-only { display: block !important; }
                 body { background: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
                 .print-main { margin: 0 !important; padding: 0 !important; }
 
@@ -1506,6 +1527,15 @@ function Dashboard() {
           )}
 
           <div style={{ padding: "26px 28px 60px" }}>
+            <div className="print-only" style={{ marginBottom: 12, borderBottom: `1px solid ${C.border}`, paddingBottom: 8 }}>
+              <div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontWeight: 700, color: C.ink }}>SHP Reporting Dashboard — {
+                page === "overview" ? "Portfolio Overview"
+                  : page === "khorrami" ? "Khorrami"
+                  : page.startsWith("region:") ? (REGIONS.find((r) => r.id === page.split(":")[1])?.name || "Region")
+                  : (PROP_BY_ID[page]?.name || page)
+              }</div>
+              <div style={{ fontSize: 11, color: C.muted }}>Generated {new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}{model.lastUpdated ? ` · data updated ${new Date(model.lastUpdated).toLocaleDateString()}` : ""}</div>
+            </div>
             {!loaded ? <div className="ui" style={{ color: C.muted }}>Loading…</div>
               : page === "overview" ? <Overview model={model} hasData={hasData} onUpload={() => fileRef.current?.click()} goto={setPage} />
                 : page === "khorrami" ? <KhorramiPage model={model} setModel={setModel} />
@@ -1648,17 +1678,22 @@ function RevenueChart({ d, metric = "revenue" }) {
       <ResponsiveContainer width="100%" height={260}>
         <ComposedChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-          <XAxis dataKey="month" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <XAxis dataKey="month" height={42} interval={0} tick={<ValueTick data={data} valueKey="cur" metric={metric} />} axisLine={false} tickLine={false} />
           <YAxis yAxisId="rev" domain={isPct ? [0, 1] : undefined} tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => isPct ? (v * 100).toFixed(0) + "%" : (metric === "revenue" ? "$" + (v / 1000).toFixed(0) + "k" : "$" + Math.round(v))} />
           {showOcc && <YAxis yAxisId="occ" orientation="right" domain={[0, 1]} tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => (v * 100).toFixed(0) + "%"} />}
           <Tooltip formatter={(v, name) => name === "Occupancy" ? fmtPct(v) : fmtV(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
           {mode === "yoy" && <Bar yAxisId="rev" dataKey="prior" fill="#c9d0da" radius={[4, 4, 0, 0]} name={`${prior}`} />}
           <Bar yAxisId="rev" dataKey="cur" fill={accent} radius={[4, 4, 0, 0]} name={`${cur}`} />
+          {metric === "revenue" && d.goal ? <ReferenceLine yAxisId="rev" y={d.goal} stroke={C.sub} strokeDasharray="5 4" strokeWidth={1.2} label={{ value: `Goal ${fmtBarLabel("revenue", d.goal)}`, position: "insideTopRight", fontSize: 10, fill: C.sub }} /> : null}
           {showOcc && <ReferenceLine yAxisId="occ" y={0.7} stroke={C.bad} strokeDasharray="5 4" strokeWidth={1.5} label={{ value: "70% goal", position: "insideTopRight", fontSize: 10, fill: C.bad }} />}
           {showOcc && <Line yAxisId="occ" type="monotone" dataKey="occ" name="Occupancy" stroke={C.ink} strokeWidth={2.5} dot={{ r: 2.5, fill: C.ink }} connectNulls />}
         </ComposedChart>
       </ResponsiveContainer>
+      {metric === "revenue" && (() => {
+        const t = data.reduce((a, r) => a + (r.cur || 0), 0); const n = data.filter((r) => r.cur != null).length;
+        return t > 0 ? <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 8, textAlign: "right" }}>Total {fmtMoney(t)} over {n} month{n === 1 ? "" : "s"} · avg {fmtMoney(t / (n || 1))}/mo</div> : null;
+      })()}
     </div>
   );
 }
@@ -1933,7 +1968,7 @@ function PropertyBars({ derived, ctl, accent }) {
         <ResponsiveContainer width="100%" height={260}>
           <BarChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-            <XAxis dataKey="name" tick={{ fontSize: 12, fill: C.muted }} axisLine={false} tickLine={false} />
+            <XAxis dataKey="name" height={42} interval={0} tick={<ValueTick data={data} valueKey="cur" metric={metric} />} axisLine={false} tickLine={false} />
             <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={axisFmt} domain={isPct ? [0, 1] : undefined} />
             <Tooltip formatter={(v) => v == null ? "—" : (isPct ? fmtPct(v) : fmtMoney(v))} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
             {(showPY || showPM) && <Legend wrapperStyle={{ fontSize: 12 }} />}
@@ -1943,6 +1978,10 @@ function PropertyBars({ derived, ctl, accent }) {
           </BarChart>
         </ResponsiveContainer>
       ) : <Empty text="Load data to compare properties." />}
+      {metric === "revenue" && data.some((c) => c.cur) && (() => {
+        const t = data.reduce((a, r) => a + (r.cur || 0), 0); const n = data.filter((r) => r.cur).length;
+        return <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 8, textAlign: "right" }}>Total {fmtMoney(t)} across {n} propert{n === 1 ? "y" : "ies"}</div>;
+      })()}
     </Panel>
   );
 }
@@ -2102,7 +2141,7 @@ function PacePanel({ derived, title }) {
       <ResponsiveContainer width="100%" height={220}>
         <BarChart data={chart} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-          <XAxis dataKey="name" tick={{ fontSize: 12, fill: C.muted }} axisLine={false} tickLine={false} />
+          <XAxis dataKey="name" height={42} interval={0} tick={<ValueTick data={chart} valueKey="This year" metric="count" />} axisLine={false} tickLine={false} />
           <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
           <Tooltip contentStyle={{ borderRadius: 10, fontSize: 12 }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -2530,13 +2569,13 @@ function UnitTrendPanel({ d }) {
           <ResponsiveContainer width="100%" height={260}>
             <ComposedChart data={data} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+              <XAxis dataKey="label" height={42} interval={0} tick={<ValueTick data={data} valueKey="revenue" metric="revenue" />} axisLine={false} tickLine={false} />
               <YAxis yAxisId="rev" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
               <YAxis yAxisId="nights" orientation="right" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
               <Tooltip formatter={(v, n) => n === "Nights" ? v : fmtMoney(v)} contentStyle={{ borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 12 }} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               <Bar yAxisId="rev" dataKey="revenue" name="Revenue" fill={d.meta.color} radius={[4, 4, 0, 0]} />
-              <Line yAxisId="nights" dataKey="nights" name="Nights" stroke={C.ink} strokeWidth={2} dot={false} />
+              <Line yAxisId="nights" dataKey="nights" name="Nights" stroke={C.ink} strokeWidth={2} dot={false}><LabelList dataKey="nights" position="top" fontSize={9.5} fill={C.ink} /></Line>
             </ComposedChart>
           </ResponsiveContainer>
         )}
@@ -2975,7 +3014,7 @@ function StayPatternsPanel({ d }) {
               <XAxis dataKey="name" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} interval={0} angle={-30} textAnchor="end" height={48} />
               <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} />
               <Tooltip formatter={(v) => v + " bookings"} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
-              <Bar dataKey="value" fill={d.meta.color} radius={[5, 5, 0, 0]} />
+              <Bar dataKey="value" fill={d.meta.color} radius={[5, 5, 0, 0]}><LabelList dataKey="value" position="top" fontSize={9.5} fill={C.ink} /></Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -2987,7 +3026,7 @@ function StayPatternsPanel({ d }) {
               <XAxis dataKey="name" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} interval={0} angle={-30} textAnchor="end" height={48} />
               <YAxis tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} />
               <Tooltip formatter={(v) => v + " bookings"} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
-              <Bar dataKey="value" fill={d.meta.color} radius={[5, 5, 0, 0]} />
+              <Bar dataKey="value" fill={d.meta.color} radius={[5, 5, 0, 0]}><LabelList dataKey="value" position="top" fontSize={9.5} fill={C.ink} /></Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -3127,7 +3166,7 @@ function BudgetPanel({ d, model, setModel, canEdit }) {
       <ResponsiveContainer width="100%" height={230}>
         <ComposedChart data={data} margin={{ top: 6, right: 8, left: -6, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
-          <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+          <XAxis dataKey="name" height={42} interval={0} tick={<ValueTick data={data} valueKey="actual" metric="revenue" />} axisLine={false} tickLine={false} />
           <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"} />
           <Tooltip formatter={(v) => v == null ? "—" : fmtMoney(v)} contentStyle={{ borderRadius: 10, fontSize: 12 }} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
