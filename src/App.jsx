@@ -36,7 +36,7 @@ const REGIONS = [
 ];
 const PROPERTIES = [
   // Fort Worth
-  { id: "soma", name: "Hotel SOMA", short: "SOMA", color: "#e07b1f", location: "Fort Worth", units: 35, market: "fortworth", goal: 100000, match: /soma/i, compareMode: "mom" },
+  { id: "soma", name: "Hotel SOMA", short: "SOMA", color: "#e07b1f", location: "Fort Worth", units: 35, market: "fortworth", goal: 175000, match: /soma/i, compareMode: "mom" },
   { id: "kress", name: "Kress", short: "Kress", color: "#1f7a4d", location: "Fort Worth", units: 9, market: "fortworth", goal: 45000, match: /kress/i, compareMode: "yoy" },
   { id: "harley", name: "Harley", short: "Harley", color: "#6a3da8", location: "Fort Worth", units: 3, market: "fortworth", goal: 30000, match: /harley/i, compareMode: "yoy" },
   // Arlington
