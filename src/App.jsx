@@ -741,6 +741,34 @@ function buildActivity(before, after, fname) {
 }
 
 /* derive KPIs for a property */
+/* ---------------- REVENUE BASIS: net of OTA host fees, or gross ----------------
+   The reporting pipeline stores revenue NET of OTA host fees (Booking.com 22%,
+   Expedia 18%, Vrbo 8%, Airbnb 15.5% of rent + cleaning) and keeps the gross figure
+   beside it as \`gross\` on monthly, channelMonthly, daily and byUnit records.
+   grossView() returns a read-only copy with gross swapped in, so every page can show
+   either basis without touching what is saved. otaByMonth / ota are always gross
+   (the channel panels take commission off themselves), so they are left alone. */
+const REV_BASIS_KEY = "shp.revBasis";
+const pickGross = (r) => (r && typeof r.gross === "number" ? { ...r, revenue: r.gross } : r);
+function grossView(model) {
+  if (!model || !model.properties) return model;
+  const properties = {};
+  for (const [pid, p] of Object.entries(model.properties)) {
+    if (!p) { properties[pid] = p; continue; }
+    const monthly = {};
+    for (const [k, r] of Object.entries(p.monthly || {})) {
+      if (r && typeof r.gross === "number") {
+        const scale = r.revenue ? r.gross / r.revenue : 1;
+        monthly[k] = { ...r, revenue: r.gross, ...(typeof r.revpar === "number" ? { revpar: r.revpar * scale } : {}) };
+      } else monthly[k] = r;
+    }
+    const mapRecs = (obj) => { const o = {}; for (const [k, r] of Object.entries(obj || {})) o[k] = pickGross(r); return o; };
+    const byUnit = p.byUnit ? Object.fromEntries(Object.entries(p.byUnit).map(([u, ms]) => [u, mapRecs(ms)])) : p.byUnit;
+    properties[pid] = { ...p, monthly, channelMonthly: mapRecs(p.channelMonthly), daily: p.daily ? mapRecs(p.daily) : p.daily, byUnit };
+  }
+  return { ...model, properties };
+}
+
 function deriveProperty(pid, model, metaOverride) {
   const p = model.properties[pid];
   const meta = metaOverride || PROP_BY_ID[pid];
@@ -1217,11 +1245,15 @@ function Dashboard() {
   const [busy, setBusy] = useState(false);
   const [propOverride, setPropOverride] = useState("auto");
   const [printing, setPrinting] = useState(false);
+  const [revBasis, setRevBasis] = useState(() => { try { return localStorage.getItem(REV_BASIS_KEY) === "gross" ? "gross" : "net"; } catch (e) { return "net"; } });
+  const chooseBasis = (b) => { setRevBasis(b); try { localStorage.setItem(REV_BASIS_KEY, b); } catch (e) {} };
   const fileRef = useRef(null);
   // Editor lock: uploading/editing is gated behind an editor password. Everyone else is view-only.
   const EDITOR_PW = import.meta.env.VITE_EDITOR_PASSWORD || "";
   const [canEdit, setCanEdit] = useState(!EDITOR_PW); // if no editor password is configured, editing is open
-  const alertCount = useMemo(() => buildAlerts(model, PROPERTIES.map((p) => p.id)).filter((a) => a.sev === "high").length, [model]);
+  // What every page reads. The saved model is never replaced by this view.
+  const viewModel = useMemo(() => (revBasis === "gross" ? grossView(model) : model), [model, revBasis]);
+  const alertCount = useMemo(() => buildAlerts(viewModel, PROPERTIES.map((p) => p.id)).filter((a) => a.sev === "high").length, [viewModel]);
 
   // ---- persistence (safety-critical) ----
   // loadState must be "ok" before we EVER write. If the initial read fails we stay in "failed" and
@@ -1468,6 +1500,18 @@ function Dashboard() {
                 </button>
               </>
             )}
+            <div className="no-print" role="group" aria-label="Revenue basis" title="Net = after OTA host fees (Booking.com 22%, Expedia 18%, Vrbo 8%, Airbnb 15.5% of rent + cleaning). Gross = before fees."
+              style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: canEdit ? 0 : 8 }}>
+              <span style={{ fontSize: 11, color: C.muted, whiteSpace: "nowrap" }}>Revenue:</span>
+              <div style={{ display: "flex", border: `1px solid ${C.border}`, borderRadius: 9, overflow: "hidden" }}>
+                {[["net", "Net of fees"], ["gross", "Gross"]].map(([b, label]) => (
+                  <button key={b} type="button" className="navbtn" onClick={() => chooseBasis(b)} aria-pressed={revBasis === b}
+                    style={{ background: revBasis === b ? C.slate : "transparent", color: revBasis === b ? "#fff" : C.slate, border: "none", padding: "7px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <button className="navbtn no-print" onClick={() => setPrinting(true)} title="Save this view as PDF"
               style={{ background: "transparent", color: C.slate, border: `1px solid ${C.border}`, borderRadius: 9, padding: "8px 13px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
               <FileText size={14} /> PDF
@@ -1534,20 +1578,21 @@ function Dashboard() {
                   : page.startsWith("region:") ? (REGIONS.find((r) => r.id === page.split(":")[1])?.name || "Region")
                   : (PROP_BY_ID[page]?.name || page)
               }</div>
-              <div style={{ fontSize: 11, color: C.muted }}>Generated {new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}{model.lastUpdated ? ` · data updated ${new Date(model.lastUpdated).toLocaleDateString()}` : ""}</div>
+              <div style={{ fontSize: 11, color: C.muted }}>Generated {new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}{model.lastUpdated ? ` · data updated ${new Date(model.lastUpdated).toLocaleDateString()}` : ""} · Revenue {revBasis === "gross" ? "gross, before OTA host fees" : "net of OTA host fees"}</div>
             </div>
             {!loaded ? <div className="ui" style={{ color: C.muted }}>Loading…</div>
-              : page === "overview" ? <Overview model={model} hasData={hasData} onUpload={() => fileRef.current?.click()} goto={setPage} />
-                : page === "khorrami" ? <KhorramiPage model={model} setModel={setModel} />
-                : page === "alerts" ? <AlertsPage model={model} />
-                : page === "units" ? <UnitsPage model={model} setModel={setModel} canEdit={canEdit} />
-                : page === "freshness" ? <FreshnessPage model={model} />
-                : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={model} goto={setPage} />
-                : page === "events" ? <Events model={model} setModel={setModel} onFiles={handleFiles} />
-                  : page === "ask" ? <AskPage model={model} />
+              : page === "overview" ? <Overview model={viewModel} hasData={hasData} onUpload={() => fileRef.current?.click()} goto={setPage} />
+                : page === "khorrami" ? <KhorramiPage model={viewModel} setModel={setModel} />
+                : page === "alerts" ? <AlertsPage model={viewModel} />
+                : page === "units" ? <UnitsPage model={viewModel} setModel={setModel} canEdit={canEdit} />
+                : page === "freshness" ? <FreshnessPage model={viewModel} />
+                : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={viewModel} goto={setPage} />
+                : page === "events" ? <Events model={viewModel} setModel={setModel} onFiles={handleFiles} />
+                  : page === "ask" ? <AskPage model={viewModel} />
+                    // Audit always shows and edits the stored (net) numbers, whatever the switch says.
                     : page === "audit" ? <AuditPage model={model} setModel={setModel} />
-                    : page === "ads" ? <AdPage model={model} />
-                    : <PropertyPage pid={page} model={model} setModel={setModel} />}
+                    : page === "ads" ? <AdPage model={viewModel} />
+                    : <PropertyPage pid={page} model={viewModel} setModel={setModel} />}
           </div>
         </main>
       </div>
@@ -3405,7 +3450,8 @@ function AuditPage({ model, setModel }) {
       const [y, mo] = monthKey.split("-").map(Number);
       const days = daysInMonth(y, mo - 1); const units = PROP_BY_ID[pid].units;
       const val = raw === "" ? null : Number(String(raw).replace(/[$,%\s]/g, ""));
-      if (field === "revenue") { cur.revenue = val || 0; delete cur.adr; delete cur.revpar; }
+      // A typed revenue replaces the pipeline's net figure, so its stored gross/fees no longer apply.
+      if (field === "revenue") { cur.revenue = val || 0; delete cur.adr; delete cur.revpar; delete cur.gross; delete cur.fees; delete cur.net; }
       if (field === "occ") { const occ = val == null ? null : (val > 1.5 ? val / 100 : val); cur.occ = occ; cur.nights = occ != null ? Math.round(occ * units * days) : 0; delete cur.adr; delete cur.revpar; }
       next.lastUpdated = new Date().toISOString();
       return next;
