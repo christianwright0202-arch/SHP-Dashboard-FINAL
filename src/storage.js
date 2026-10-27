@@ -13,7 +13,10 @@ import { createClient } from "@supabase/supabase-js";
 const URL = import.meta.env.VITE_SUPABASE_URL;
 const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const TABLE = "dashboard_state";
-const MAIN_ID = "shp-main";
+// VITE_MODEL_ROW points a local preview at the 'shp-test' scratch row the Python writer fills.
+// Any row other than shp-main is READ-ONLY: a preview must never save, back up or prune backups.
+const MAIN_ID = import.meta.env.VITE_MODEL_ROW || "shp-main";
+const PREVIEW = MAIN_ID !== "shp-main";
 const MAX_BACKUPS = 12;
 
 // Column names seen across setups; the real one is detected on first use.
@@ -76,6 +79,7 @@ export async function loadModel() {
 /** Save the model. Refuses to wipe good data; keeps a rolling backup first. */
 export async function saveModel(model, opts = {}) {
   if (!client) return { ok: false, reason: "not-configured" };
+  if (PREVIEW) return { ok: false, reason: "preview-read-only" };
   let col;
   try { col = await detectColumn(); } catch (e) { return { ok: false, reason: e.message }; }
 
@@ -122,6 +126,7 @@ async function pruneBackups() {
 
 export async function restoreBackup(id) {
   if (!client) throw new Error("not configured");
+  if (PREVIEW) throw new Error("preview is read-only");
   const col = await detectColumn();
   const { data, error } = await client.from(TABLE).select(`id, ${col}`).eq("id", id).maybeSingle();
   if (error || !data) throw new Error("backup not found");

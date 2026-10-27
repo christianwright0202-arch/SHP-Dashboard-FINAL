@@ -3030,10 +3030,23 @@ function FreshnessPage({ model }) {
 // Booking window + length of stay, derived from the booking date Hostfully embeds in the Source cell.
 function StayPatternsPanel({ d }) {
   const rs = d.resStats || {};
-  const keys = Object.keys(rs).sort();
-  if (!keys.length) return <Panel title="Booking window & length of stay"><Empty text="Needs reservation-level data (Hostfully STR export). Cloudbeds monthly exports don't carry booking dates." /></Panel>;
-  const agg = { n: 0, losSum: 0, leadSum: 0, leadN: 0, losHist: {}, leadHist: {} };
-  keys.forEach((k) => { const st = rs[k]; agg.n += st.n || 0; agg.losSum += st.losSum || 0; agg.leadSum += st.leadSum || 0; agg.leadN += st.leadN || 0;
+  const allKeys = Object.keys(rs).sort();
+  if (!allKeys.length) return <Panel title="Booking window & length of stay"><Empty text="Needs reservation-level data: the Hostfully STR export, or the Cloudbeds booking-window tab for the hotels." /></Panel>;
+  // Only check-in months that are over. An upcoming month holds just its early bookers, so its
+  // booking window reads far too long until the month fills. Last 12 completed months.
+  const now = new Date();
+  const curKey = mkey(now.getFullYear(), now.getMonth());
+  const fromKey = mkey(now.getFullYear() - 1, now.getMonth());
+  let keys = allKeys.filter((k) => k < curKey && k >= fromKey && (rs[k].n || 0) > 0);
+  const fallback = !keys.length;
+  if (fallback) keys = allKeys.filter((k) => (rs[k].n || 0) > 0);
+  // Data from a one-off upload stops on the upload date, so its last few months hold only early
+  // bookers. Drop trailing months with under half the usual booking count rather than show them.
+  const counts = keys.map((k) => rs[k].n || 0).sort((a, b) => a - b);
+  const usual = counts.length ? counts[Math.floor(counts.length / 2)] : 0;
+  while (keys.length > 1 && (rs[keys[keys.length - 1]].n || 0) < usual * 0.5) keys = keys.slice(0, -1);
+  const agg = { n: 0, losSum: 0, leadSum: 0, leadN: 0, losHist: {}, leadHist: {}, longStays: 0 };
+  keys.forEach((k) => { const st = rs[k]; agg.n += st.n || 0; agg.losSum += st.losSum || 0; agg.leadSum += st.leadSum || 0; agg.leadN += st.leadN || 0; agg.longStays += st.longStays || 0;
     Object.entries(st.losHist || {}).forEach(([b, v]) => agg.losHist[b] = (agg.losHist[b] || 0) + v);
     Object.entries(st.leadHist || {}).forEach(([b, v]) => agg.leadHist[b] = (agg.leadHist[b] || 0) + v); });
   const LOS_ORDER = ["1", "2", "3", "4-6", "7-13", "14+"];
@@ -3042,14 +3055,81 @@ function StayPatternsPanel({ d }) {
   const leadData = LEAD_ORDER.filter((b) => agg.leadHist[b]).map((b) => ({ name: b, value: agg.leadHist[b] }));
   const avgLos = agg.n ? agg.losSum / agg.n : null;
   const avgLead = agg.leadN ? agg.leadSum / agg.leadN : null;
+  const lyOf = (k) => { const [yy, mo] = k.split("-"); return `${+yy - 1}-${mo}`; };
+  const monthRow = (k) => { const st = rs[k] || {}; const ly = rs[lyOf(k)]; return {
+    key: k, name: MONTHS[+k.slice(5) - 1] + " " + k.slice(2, 4), n: st.n || 0,
+    window: st.leadN ? st.leadSum / st.leadN : null, windowMed: st.leadMed ?? null,
+    stay: st.n ? st.losSum / st.n : null, stayMed: st.losMed ?? null,
+    windowLY: ly?.leadN ? ly.leadSum / ly.leadN : null,
+    stayLY: ly?.n ? ly.losSum / ly.n : null,
+  }; };
+  const trend = keys.map(monthRow);
+  const hasMed = trend.some((t) => t.windowMed != null);
+  const hasLY = trend.some((t) => t.windowLY != null);
+  const last = trend[trend.length - 1];
+  const vsLY = (cur, ly) => (cur == null || !ly) ? null : (cur - ly) / ly;
+  const arrow = (x) => x == null ? null : `${x >= 0 ? "▲" : "▼"} ${Math.abs(x * 100).toFixed(0)}% vs last year`;
+  const fmtD = (v) => v == null ? "—" : Math.round(v) + "d";
+  const big = (label, val, sub) => (
+    <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>{label}</div>
+      <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{val}</div>
+      {sub ? <div style={{ fontSize: 11, color: C.muted }}>{sub}</div> : null}</div>
+  );
   return (
-    <Panel title="Booking window & length of stay">
+    <Panel title="Booking window & length of stay" right={<span className="ui" style={{ fontSize: 11.5, color: C.muted }}>{fallback ? "all months on file" : "last 12 completed months · by check-in month"}</span>}>
       {d?.liveOnly && <AllUnitsNote />}
-      <div className="ui" style={{ display: "flex", gap: 22, marginBottom: 12, flexWrap: "wrap" }}>
-        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Avg stay</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{avgLos != null ? avgLos.toFixed(1) + " nights" : "—"}</div></div>
-        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Avg booking window</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{avgLead != null ? Math.round(avgLead) + " days" : "—"}</div></div>
-        <div><div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Bookings analysed</div><div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}>{agg.n.toLocaleString()}</div></div>
+      <div className="ui" style={{ display: "flex", gap: 26, marginBottom: 14, flexWrap: "wrap" }}>
+        {big("Avg stay", avgLos != null ? avgLos.toFixed(1) + " nights" : "—")}
+        {big("Avg booking window", avgLead != null ? Math.round(avgLead) + " days" : "—")}
+        {last && big(`${monthKeyLabel(last.key)} window`, last.window != null ? Math.round(last.window) + " days" : "—",
+          [last.windowMed != null ? `typical guest ${Math.round(last.windowMed)} days` : null, arrow(vsLY(last.window, last.windowLY))].filter(Boolean).join(" · "))}
+        {last && big(`${monthKeyLabel(last.key)} stay`, last.stay != null ? last.stay.toFixed(2) + " nights" : "—",
+          [last.stayMed != null ? `typical guest ${last.stayMed} night${last.stayMed === 1 ? "" : "s"}` : null, arrow(vsLY(last.stay, last.stayLY))].filter(Boolean).join(" · "))}
+        {big("Bookings analysed", agg.n.toLocaleString())}
       </div>
+      {trend.length > 1 && (
+        <div style={{ marginBottom: 16 }}>
+          <div className="ui" style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 6 }}>By check-in month — booking window (bars) and average stay (line)</div>
+          <ResponsiveContainer width="100%" height={220}>
+            <ComposedChart data={trend} margin={{ top: 14, right: 4, left: -14, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10.5, fill: C.muted }} axisLine={false} tickLine={false} />
+              <YAxis yAxisId="d" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => v + "d"} />
+              <YAxis yAxisId="n" orientation="right" tick={{ fontSize: 10, fill: C.muted }} axisLine={false} tickLine={false} domain={[0, (max) => Math.max(3, Math.ceil(max + 0.5))]} tickFormatter={(v) => v + "n"} />
+              <Tooltip contentStyle={{ borderRadius: 10, fontSize: 12 }} formatter={(v, name) => v == null ? "—" : /stay/i.test(name) ? v.toFixed(2) + " nights" : Math.round(v) + " days"} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              {hasLY && <Bar yAxisId="d" dataKey="windowLY" fill="#d5dae1" radius={[4, 4, 0, 0]} name="Window last year" />}
+              <Bar yAxisId="d" dataKey="window" fill={d.meta.color} radius={[4, 4, 0, 0]} name="Avg booking window"><LabelList dataKey="window" position="top" fontSize={9.5} fill={C.ink} formatter={(v) => v == null ? "" : Math.round(v)} /></Bar>
+              <Line yAxisId="n" type="monotone" dataKey="stay" stroke={C.ink} strokeWidth={2} dot={{ r: 3 }} name="Avg stay" />
+            </ComposedChart>
+          </ResponsiveContainer>
+          {hasMed && (
+            <div style={{ overflowX: "auto", marginTop: 8 }}>
+              <table className="ui" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead><tr style={{ color: C.muted, textAlign: "right" }}>
+                  <th style={{ textAlign: "left", padding: "4px 6px", fontWeight: 600 }}>Check-in</th>
+                  <th style={{ padding: "4px 6px", fontWeight: 600 }}>Bookings</th>
+                  <th style={{ padding: "4px 6px", fontWeight: 600 }}>Avg window</th>
+                  <th style={{ padding: "4px 6px", fontWeight: 600 }}>Typical window</th>
+                  <th style={{ padding: "4px 6px", fontWeight: 600 }}>Avg stay</th>
+                  <th style={{ padding: "4px 6px", fontWeight: 600 }}>Typical stay</th>
+                  {hasLY && <th style={{ padding: "4px 6px", fontWeight: 600 }}>Window vs LY</th>}
+                </tr></thead>
+                <tbody>{trend.slice().reverse().slice(0, 6).map((t) => { const dl = vsLY(t.window, t.windowLY); return (
+                  <tr key={t.key} style={{ borderTop: `1px solid ${C.track}`, textAlign: "right" }}>
+                    <td style={{ textAlign: "left", padding: "4px 6px", fontWeight: 600 }}>{monthKeyLabel(t.key)}</td>
+                    <td style={{ padding: "4px 6px" }}>{t.n}</td>
+                    <td style={{ padding: "4px 6px" }}>{fmtD(t.window)}</td>
+                    <td style={{ padding: "4px 6px" }}>{fmtD(t.windowMed)}</td>
+                    <td style={{ padding: "4px 6px" }}>{t.stay == null ? "—" : t.stay.toFixed(2)}</td>
+                    <td style={{ padding: "4px 6px" }}>{t.stayMed ?? "—"}</td>
+                    {hasLY && <td style={{ padding: "4px 6px", color: dl == null ? C.faint : dl >= 0 ? C.good : C.bad }}>{dl == null ? "—" : (dl >= 0 ? "▲ " : "▼ ") + Math.abs(dl * 100).toFixed(0) + "%"}</td>}
+                  </tr>); })}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
         <div>
           <div className="ui" style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 6 }}>How far ahead guests book</div>
@@ -3075,6 +3155,9 @@ function StayPatternsPanel({ d }) {
             </BarChart>
           </ResponsiveContainer>
         </div>
+      </div>
+      <div className="ui" style={{ fontSize: 11.5, color: C.muted, marginTop: 8, lineHeight: 1.5 }}>
+        Cancellations and no-shows are left out{agg.longStays ? `, as are ${agg.longStays} monthly stay${agg.longStays === 1 ? "" : "s"} of 30+ nights` : ""}. "Typical" is the median guest — a few bookings made months ahead pull the average up. The current and upcoming months are left out until they finish, since only early bookers are on the books so far.
       </div>
     </Panel>
   );
