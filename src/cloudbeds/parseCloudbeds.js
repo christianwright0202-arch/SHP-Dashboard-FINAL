@@ -286,7 +286,7 @@ export function expandStayNights(res) {
         date: toISO(d), property: res.property, roomType: res.rooms[rm] || res.roomType,
         channel: res.channel, collectType: res.collectType,
         revenue: perRoomNightRevenue, nightlyRate: res.nightlyRate, isRateOutlier: res.isRateOutlier,
-        status: res.status, key: res.key, name: res.name, promoCode: res.promoCode,
+        adrEligible: res.adrEligible, status: res.status, key: res.key, name: res.name, promoCode: res.promoCode,
       });
     }
   }
