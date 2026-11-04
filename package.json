@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "ingest:cloudbeds": "node scripts/ingest-cloudbeds.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.6",
@@ -18,6 +21,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
-    "vite": "^5.3.1"
+    "vite": "^5.3.1",
+    "vitest": "^2.1.9"
   }
 }

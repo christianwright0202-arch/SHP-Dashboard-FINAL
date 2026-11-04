@@ -5,6 +5,8 @@ import {
 } from "recharts";
 import * as XLSX from "xlsx";
 import { loadModel, saveModel, modelHasData, listBackups, restoreBackup } from "./storage";
+import { CLOUDBEDS_ENABLED } from "./featureFlags";
+import { CloudbedsUploadButton, CloudbedsAuditReport } from "./cloudbeds/CloudbedsPanel.jsx";
 import {
   Upload, TrendingUp, TrendingDown, AlertTriangle, Calendar, Sparkles,
   LayoutGrid, Building2, MessageSquare, Send, RefreshCw, Trash2, FileText,
@@ -1482,6 +1484,7 @@ function Dashboard() {
                   {busy ? <Loader2 size={15} className="spin" style={{ animation: "spin 1s linear infinite" }} /> : <Upload size={15} />} Upload data
                 </button>
                 <span style={{ fontSize: 12, color: C.muted }}>.xlsx · .csv · .png · .jpg · .pdf — drag & drop anywhere</span>
+                {CLOUDBEDS_ENABLED && <CloudbedsUploadButton canEdit={canEdit} />}
                 <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 11, color: C.muted }}>Assign to:</span>
                   <select value={propOverride} onChange={(e) => setPropOverride(e.target.value)}
@@ -3542,12 +3545,13 @@ function AuditPage({ model, setModel }) {
   };
 
   if (!derived.length) {
-    return (<><SectionTitle sub="Inspect and edit every number">Data Audit</SectionTitle><div style={{ marginBottom: 16 }}><BackupPanel setModel={setModel} canEdit={true} /></div><Panel title="No data"><Empty text="Upload data first (or just open a property below and type the numbers in)." /></Panel></>);
+    return (<><SectionTitle sub="Inspect and edit every number">Data Audit</SectionTitle>{CLOUDBEDS_ENABLED && <CloudbedsAuditReport />}<div style={{ marginBottom: 16 }}><BackupPanel setModel={setModel} canEdit={true} /></div><Panel title="No data"><Empty text="Upload data first (or just open a property below and type the numbers in)." /></Panel></>);
   }
 
   return (
     <div>
       <SectionTitle sub="Trace every KPI to its inputs — and edit any number directly">Data Audit</SectionTitle>
+      {CLOUDBEDS_ENABLED && <CloudbedsAuditReport />}
       <div style={{ marginBottom: 16 }}><BackupPanel setModel={setModel} canEdit={true} /></div>
 
       <Panel title="Edit mode" style={{ marginBottom: 16 }}>

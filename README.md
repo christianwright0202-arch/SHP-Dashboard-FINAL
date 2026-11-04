@@ -111,6 +111,43 @@ Now the site asks for a password before it opens, and your API endpoint is prote
 - Visit your Vercel URL from any device, enter the password, upload new files.
 - New data updates the charts and is saved to the cloud automatically.
 
+## Refreshing the Cloudbeds reservation data
+
+The reservation-level analysis (Game Day / Pace / Cancellations) is driven by the
+Cloudbeds **reservations** export — separate from the Hostfully/RevPAR files that the
+regular **Upload data** button takes. One table, `cloudbeds_reservations`, holds one
+row per reservation (including cancelled ones). Re-uploading overlapping data updates
+rows instead of duplicating them.
+
+**One-time setup:** paste `supabase_setup.sql` into the Supabase SQL editor and run it
+(it now also creates the `cloudbeds_reservations` table).
+
+**To refresh (either way works):**
+
+1. **In the app** — In Cloudbeds, export *Reservations* to Excel. In the dashboard
+   (editing unlocked) click **Upload Cloudbeds reservations** and pick that file. It
+   auto-detects the Cloudbeds columns, cleans the data, and saves it. The **Data Audit**
+   page then shows a quality report: rows in / kept / dropped, and what was cleaned or
+   guessed.
+2. **From the command line** — drop the export at `data/cloudbeds_reservations.xlsx` and run:
+
+   ```bash
+   npm run ingest:cloudbeds
+   ```
+
+   Add `-- --write` to push to Supabase, or `-- --dry-run` to only print the quality
+   report. It reads your Supabase keys from `.env`.
+
+**Visibility:** the Cloudbeds upload button and the new analysis pages are behind a
+feature flag — **on** when you run `npm run dev` locally, **off** on the deployed site
+until you set `VITE_ENABLE_CLOUDBEDS=1` in Vercel and redeploy.
+
+**Run the tests** (the cleaning rules are unit-tested) with:
+
+```bash
+npm test
+```
+
 ## If something breaks
 - Copy the red error text from the VS Code terminal (or the Vercel build log) and
   send it to Claude — that's the fastest fix.
