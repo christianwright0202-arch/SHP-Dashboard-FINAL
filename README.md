@@ -138,6 +138,18 @@ rows instead of duplicating them.
    Add `-- --write` to push to Supabase, or `-- --dry-run` to only print the quality
    report. It reads your Supabase keys from `.env`.
 
+**What you get** (sidebar, under Events, once the flag is on):
+- **Game Day** — upcoming demand events with booking pace vs the same point last year.
+- **Event Calendar** — the verified 2025–2026 event list with the ADR your rooms
+  actually captured on each date and the lift vs your non-event average.
+- **Pace** — on-the-books vs same-time-last-year for any target month, plus the
+  booking curve and 30-day pickup.
+- **Cancellations** — cancellation and no-show rates by month and channel, lost
+  room-nights, and how far before arrival cancellations happen.
+
+Every page has a filter bar (property · date range) and info tooltips on each tile
+explaining the formula.
+
 **Visibility:** the Cloudbeds upload button and the new analysis pages are behind a
 feature flag — **on** when you run `npm run dev` locally, **off** on the deployed site
 until you set `VITE_ENABLE_CLOUDBEDS=1` in Vercel and redeploy.

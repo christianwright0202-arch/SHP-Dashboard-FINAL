@@ -283,7 +283,7 @@ export function expandStayNights(res) {
     const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
     for (let rm = 0; rm < roomsCount; rm++) {
       out.push({
-        date: toISO(d), property: res.property, roomType: res.rooms[rm] || res.roomType,
+        date: toISO(d), property: res.property, roomType: (res.rooms && res.rooms[rm]) || res.roomType,
         channel: res.channel, collectType: res.collectType,
         revenue: perRoomNightRevenue, nightlyRate: res.nightlyRate, isRateOutlier: res.isRateOutlier,
         adrEligible: res.adrEligible, status: res.status, key: res.key, name: res.name, promoCode: res.promoCode,

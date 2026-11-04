@@ -6,6 +6,7 @@ import React, { useState, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { createClient } from "@supabase/supabase-js";
 import { parseCloudbedsRows, toDbRow } from "./parseCloudbeds.js";
+import { setCloudbedsData } from "./dataStore.js";
 
 const REPORT_KEY = "cloudbeds_last_report";
 const TABLE = "cloudbeds_reservations";
@@ -45,6 +46,7 @@ export function CloudbedsUploadButton({ canEdit = true }) {
       const { reservations, report } = parseCloudbedsRows(rows);
       report.uploadedAt = new Date().toISOString();
       report.fileName = file.name;
+      setCloudbedsData(reservations, report); // make the analysis pages show this data immediately
 
       if (!supa) {
         saveReport(report);

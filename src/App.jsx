@@ -7,6 +7,7 @@ import * as XLSX from "xlsx";
 import { loadModel, saveModel, modelHasData, listBackups, restoreBackup } from "./storage";
 import { CLOUDBEDS_ENABLED } from "./featureFlags";
 import { CloudbedsUploadButton, CloudbedsAuditReport } from "./cloudbeds/CloudbedsPanel.jsx";
+import { CloudbedsPage, CLOUDBEDS_NAV } from "./cloudbeds/pages.jsx";
 import {
   Upload, TrendingUp, TrendingDown, AlertTriangle, Calendar, Sparkles,
   LayoutGrid, Building2, MessageSquare, Send, RefreshCw, Trash2, FileText,
@@ -1447,6 +1448,9 @@ function Dashboard() {
           <NavItem icon={<Activity size={17} />} label="Data freshness" active={page === "freshness"} onClick={() => setPage("freshness")} color="#8ea0b8" />
           <NavItem icon={<Building2 size={17} />} label="Units" active={page === "units"} onClick={() => setPage("units")} color="#8ea0b8" />
           <NavItem icon={<Calendar size={17} />} label="Events" active={page === "events"} onClick={() => setPage("events")} color="#8ea0b8" />
+          {CLOUDBEDS_ENABLED && CLOUDBEDS_NAV.map((n) => (
+            <NavItem key={n.id} icon={<Calendar size={17} />} label={n.label} active={page === n.id} onClick={() => setPage(n.id)} color="#8ea0b8" />
+          ))}
           <NavItem icon={<TrendingUp size={17} />} label="Ad Performance" active={page === "ads"} onClick={() => setPage("ads")} color="#8ea0b8" />
           <NavItem icon={<MessageSquare size={17} />} label="Ask the Board" active={page === "ask"} onClick={() => setPage("ask")} color="#8ea0b8" />
           <NavItem icon={<Search size={17} />} label="Data Audit" active={page === "audit"} onClick={() => setPage("audit")} color="#8ea0b8" />
@@ -1591,6 +1595,7 @@ function Dashboard() {
                 : page === "freshness" ? <FreshnessPage model={viewModel} />
                 : page.startsWith("region:") ? <RegionPage region={page.split(":")[1]} model={viewModel} goto={setPage} />
                 : page === "events" ? <Events model={viewModel} setModel={setModel} onFiles={handleFiles} />
+                : (CLOUDBEDS_ENABLED && page.startsWith("cb:")) ? <CloudbedsPage page={page} />
                   : page === "ask" ? <AskPage model={viewModel} />
                     // Audit always shows and edits the stored (net) numbers, whatever the switch says.
                     : page === "audit" ? <AuditPage model={model} setModel={setModel} />
