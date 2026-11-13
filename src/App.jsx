@@ -767,7 +767,9 @@ function grossView(model) {
     }
     const mapRecs = (obj) => { const o = {}; for (const [k, r] of Object.entries(obj || {})) o[k] = pickGross(r); return o; };
     const byUnit = p.byUnit ? Object.fromEntries(Object.entries(p.byUnit).map(([u, ms]) => [u, mapRecs(ms)])) : p.byUnit;
-    properties[pid] = { ...p, monthly, channelMonthly: mapRecs(p.channelMonthly), daily: p.daily ? mapRecs(p.daily) : p.daily, byUnit };
+    // runLog entries (and their per-month rows) carry gross beside the net change too.
+    const runLog = p.runLog ? Object.fromEntries(Object.entries(p.runLog).map(([dt, e]) => [dt, { ...pickGross(e), months: mapRecs(e.months) }])) : p.runLog;
+    properties[pid] = { ...p, monthly, channelMonthly: mapRecs(p.channelMonthly), daily: p.daily ? mapRecs(p.daily) : p.daily, byUnit, runLog };
   }
   return { ...model, properties };
 }
@@ -2658,6 +2660,7 @@ function PropertyPage({ pid, model, setModel }) {
       <div style={{ marginTop: 16 }}>
         <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} — ${ctl.canYoy ? "year over year by month" : "by month"}`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
       </div>
+      <div style={{ marginTop: 16 }}><DailyChangesPanel logs={[d.raw?.runLog]} accent={meta.color} liveOnly={d.liveOnly} /></div>
       {d.raw?.byUnit && (
         <div style={{ marginTop: 16 }}><UnitBreakdown d={d} period={ctl.period} /></div>
       )}
@@ -2720,6 +2723,7 @@ function KhorramiPage({ model, setModel }) {
             <Panel title={`${METRIC_DEFS.find((x) => x.id === ctl.metric)?.label || "Revenue"} by month`}><RevenueChart d={d} metric={ctl.metric} /></Panel>
             <Panel title="OTA channel mix"><OtaChart d={d} /></Panel>
           </div>
+          <div style={{ marginTop: 16 }}><DailyChangesPanel logs={(scope === "all" ? members : [scope]).map((mid) => model.properties?.[mid]?.runLog)} accent={meta.color} combined={scope === "all" ? memberNames : null} /></div>
           <div style={{ marginTop: 16 }}><HealthBoard derived={[d]} goto={() => {}} title="Property health" /></div>
           <div style={{ marginTop: 16 }}><YoyReport d={d} /></div>
         </>
@@ -3032,6 +3036,169 @@ function FreshnessPage({ model }) {
         </div>
       )}
     </div>
+  );
+}
+
+/* ---------------- DAILY CHANGES ----------------
+   The reporting pipeline stores p.runLog: report date -> what that report changed against the
+   one before it (new bookings, cancellations, rate changes), broken down by the stay month and
+   the channel (see reporting/shp_run_log.py). Entries carry `revenue` (net of host fees) and
+   `gross`; grossView swaps them like every other record. Entries from before the net switch
+   (Oct 15, 2026) have no net figure and are shown on gross, marked with an asterisk. */
+function mergeRunLogs(logs) {
+  const out = {};
+  for (const log of logs) {
+    for (const [date, e] of Object.entries(log || {})) {
+      const cur = out[date] || (out[date] = { since: e.since, gross: 0, revenue: 0, nights: 0, months: {}, channels: {}, netOk: true });
+      if (e.since && e.since < cur.since) cur.since = e.since;
+      cur.gross += e.gross || 0; cur.nights += e.nights || 0;
+      if (typeof e.revenue === "number") cur.revenue += e.revenue; else cur.netOk = false;
+      for (const [mk, m] of Object.entries(e.months || {})) {
+        const t = cur.months[mk] || (cur.months[mk] = { gross: 0, revenue: 0, nights: 0, netOk: true });
+        t.gross += m.gross || 0; t.nights += m.nights || 0;
+        if (typeof m.revenue === "number") t.revenue += m.revenue; else t.netOk = false;
+      }
+      for (const [c, v] of Object.entries(e.channels || {})) cur.channels[c] = (cur.channels[c] || 0) + v;
+    }
+  }
+  for (const e of Object.values(out)) {
+    if (!e.netOk) delete e.revenue;
+    for (const m of Object.values(e.months)) if (!m.netOk) delete m.revenue;
+  }
+  return out;
+}
+const RUNLOG_RANGES = [{ id: 30, label: "30 days" }, { id: 90, label: "90 days" }, { id: 0, label: "All" }];
+function DailyChangesPanel({ logs, accent, liveOnly, combined }) {
+  const log = useMemo(() => mergeRunLogs(logs || []), [logs]);
+  const dates = useMemo(() => Object.keys(log).sort(), [log]);
+  const [range, setRange] = useState(30);
+  const [month, setMonth] = useState("all");
+  const [showAll, setShowAll] = useState(false);
+  if (!dates.length) return <Panel title="Daily changes"><Empty text="Fills in once the reporting pipeline has run on two consecutive report days." /></Panel>;
+
+  const color = accent || C.ink;
+  const val = (r) => (r == null ? null : typeof r.revenue === "number" ? r.revenue : (r.gross ?? null));
+  const isGrossOnly = (r) => r != null && typeof r.revenue !== "number";
+  const mLab = (k) => MONTHS[+k.slice(5, 7) - 1] + " '" + k.slice(2, 4);
+  const dLab = (s) => MONTHS[+s.slice(5, 7) - 1] + " " + +s.slice(8, 10);
+  const sgn = (v, dec = 0) => v == null ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + fmtMoney(Math.abs(v), dec);
+  const sgnN = (v) => v == null ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v);
+  const tone = (v) => (v > 0 ? C.good : v < 0 ? C.bad : C.muted);
+
+  const stayMonths = [...new Set(dates.flatMap((dt) => Object.keys(log[dt].months || {})))].sort().reverse();
+  const last = dates[dates.length - 1];
+  const cutoff = range ? new Date(new Date(last + "T00:00:00").getTime() - range * 86400000).toISOString().slice(0, 10) : "0000";
+  // one row per report date in range, on the chosen stay-month scope
+  const rows = dates.filter((dt) => dt >= cutoff).map((dt) => {
+    const e = log[dt];
+    const rec = month === "all" ? e : (e.months || {})[month];
+    if (!rec) return null;
+    return { date: dt, since: e.since, v: val(rec), gross: rec.gross ?? 0, nights: rec.nights || 0, grossOnly: isGrossOnly(rec), months: e.months || {}, channels: e.channels || {} };
+  }).filter(Boolean);
+  // A window that reaches back past the net switch is summed on gross for every row, so the
+  // total stays on one basis; it is then labelled gross*.
+  const sumSince = (iso) => {
+    const inWin = rows.filter((r) => r.date >= iso);
+    const g = inWin.some((r) => r.grossOnly);
+    return { v: inWin.reduce((a, r) => a + ((g ? r.gross : r.v) || 0), 0), n: inWin.reduce((a, r) => a + r.nights, 0), g, c: inWin.length };
+  };
+  const d7 = sumSince(new Date(new Date(last + "T00:00:00").getTime() - 7 * 86400000).toISOString().slice(0, 10));
+  const d30 = sumSince(new Date(new Date(last + "T00:00:00").getTime() - 30 * 86400000).toISOString().slice(0, 10));
+  const latest = rows[rows.length - 1];
+  const chart = rows.map((r) => ({ ...r, label: dLab(r.date) }));
+  const tableRows = rows.slice().reverse().slice(0, showAll ? rows.length : 10);
+  const anyGross = rows.some((r) => r.grossOnly);
+
+  const big = (label, v, sub, forceTone) => (
+    <div style={{ minWidth: 120 }}>
+      <div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>{label}</div>
+      <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700, color: forceTone || (v == null ? C.muted : tone(v)) }}>{sgn(v)}</div>
+      {sub ? <div style={{ fontSize: 11, color: C.muted }}>{sub}</div> : null}
+    </div>
+  );
+  const Tip = ({ active, payload }) => {
+    if (!active || !payload || !payload.length) return null;
+    const r = payload[0].payload;
+    const ms = Object.keys(r.months).sort();
+    return (
+      <div className="ui" style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 11px", fontSize: 12, boxShadow: "0 4px 14px rgba(0,0,0,.08)" }}>
+        <div style={{ fontWeight: 700, color: C.ink }}>{dLab(r.date)} report{r.since ? <span style={{ fontWeight: 400, color: C.muted }}> · since {dLab(r.since)}</span> : null}</div>
+        <div style={{ color: tone(r.v), fontWeight: 700, marginTop: 2 }}>{sgn(r.v)}{r.grossOnly ? "*" : ""} <span style={{ color: C.sub, fontWeight: 400 }}>· {sgnN(r.nights)} nights</span></div>
+        {month === "all" && ms.length ? <div style={{ marginTop: 4, color: C.sub }}>{ms.map((mk) => <div key={mk}>{mLab(mk)} <b style={{ color: tone(val(r.months[mk])) }}>{sgn(val(r.months[mk]))}</b> · {sgnN(r.months[mk].nights || 0)} n</div>)}</div> : null}
+      </div>
+    );
+  };
+  const chips = (obj, labeler, max) => Object.entries(obj).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, max).map(([k, v]) => (
+    <span key={k} style={{ display: "inline-block", fontSize: 11, padding: "2px 7px", borderRadius: 6, background: "#f4f6f8", border: `1px solid ${C.border}`, color: C.sub, marginRight: 4, marginBottom: 2, whiteSpace: "nowrap" }}>{labeler(k)} <b style={{ color: tone(v) }}>{sgn(v)}</b></span>
+  ));
+  const btn = (on, onClick, label) => (
+    <button key={label} onClick={onClick} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${on ? color : C.border}`, background: on ? color : "#fff", color: on ? "#fff" : C.sub }}>{label}</button>
+  );
+  const th = { padding: "5px 8px", textAlign: "left" }, thR = { ...th, textAlign: "right" }, td = { padding: "6px 8px", borderTop: `1px solid ${C.track}`, verticalAlign: "top" }, tdR = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" };
+
+  return (
+    <Panel title="Daily changes — what each report moved" right={<span className="ui" style={{ fontSize: 11.5, color: C.muted }}>{rows.length} report day{rows.length === 1 ? "" : "s"}{combined ? ` · ${combined}` : ""}</span>}>
+      {liveOnly && <AllUnitsNote />}
+      <div className="ui" style={{ fontSize: 12.5, color: C.sub, marginBottom: 12, lineHeight: 1.5 }}>
+        Each report is compared with the one before it. A row is the net effect of new bookings, cancellations and rate changes that day, grouped by the month the stay falls in — not revenue earned that day. A gap between report dates (weekends, missed runs) rolls into the next row.
+      </div>
+      <div className="ui" style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
+        {RUNLOG_RANGES.map((r) => btn(range === r.id, () => setRange(r.id), r.label))}
+        <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ marginLeft: 6, fontSize: 12.5, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", color: C.ink, cursor: "pointer" }}>
+          <option value="all">All stay months</option>
+          {stayMonths.map((k) => <option key={k} value={k}>Stays in {mLab(k)}</option>)}
+        </select>
+      </div>
+      {!rows.length ? <Empty text="Nothing moved in this range for that month." /> : (
+        <>
+          <div className="ui" style={{ display: "flex", gap: 26, marginBottom: 14, flexWrap: "wrap" }}>
+            {big(`Latest · ${dLab(latest.date)}`, latest.v, `${sgnN(latest.nights)} nights${latest.since ? ` · since ${dLab(latest.since)}` : ""}${latest.grossOnly ? " · gross" : ""}`)}
+            {big("Last 7 days", d7.v, `${sgnN(d7.n)} nights · ${d7.c} report${d7.c === 1 ? "" : "s"}${d7.g ? " · gross*" : ""}`)}
+            {big("Last 30 days", d30.v, `${sgnN(d30.n)} nights · ${d30.c} report${d30.c === 1 ? "" : "s"}${d30.g ? " · gross*" : ""}`)}
+            <div style={{ minWidth: 120 }}>
+              <div style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: .5 }}>Days up / down</div>
+              <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontWeight: 700 }}><span style={{ color: C.good }}>{rows.filter((r) => r.v > 0).length}</span> <span style={{ color: C.faint }}>/</span> <span style={{ color: C.bad }}>{rows.filter((r) => r.v < 0).length}</span></div>
+              <div style={{ fontSize: 11, color: C.muted }}>in this range</div>
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={190}>
+            <BarChart data={chart} margin={{ top: 6, right: 8, left: -8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.track} vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: C.muted }} axisLine={false} tickLine={false} interval="preserveStartEnd" minTickGap={18} />
+              <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={(v) => (v === 0 ? "0" : (v > 0 ? "+" : "−") + "$" + (Math.abs(v) / 1000).toFixed(Math.abs(v) >= 10000 ? 0 : 1) + "k")} />
+              <Tooltip content={<Tip />} cursor={{ fill: "rgba(0,0,0,.035)" }} />
+              <ReferenceLine y={0} stroke={C.borderStrong} />
+              <Bar dataKey="v" radius={[4, 4, 0, 0]} maxBarSize={26} isAnimationActive={false}>{chart.map((r) => <Cell key={r.date} fill={r.v < 0 ? C.bad : color} fillOpacity={r.grossOnly ? .45 : .9} />)}</Bar>
+            </BarChart>
+          </ResponsiveContainer>
+          <table className="ui" style={{ width: "100%", fontSize: 12.5, borderCollapse: "collapse", marginTop: 10 }}>
+            <thead><tr style={{ color: C.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: .5 }}>
+              <th style={th}>Report</th><th style={th}>Since</th><th style={thR}>Revenue</th><th style={thR}>Nights</th>
+              {month === "all" && <th style={th}>By stay month</th>}<th style={th}>By channel</th></tr></thead>
+            <tbody>
+              {tableRows.map((r) => (
+                <tr key={r.date}>
+                  <td style={{ ...td, fontWeight: 600, color: C.ink, whiteSpace: "nowrap" }}>{dLab(r.date)}</td>
+                  <td style={{ ...td, color: C.muted, whiteSpace: "nowrap" }}>{r.since ? dLab(r.since) : "—"}</td>
+                  <td style={{ ...tdR, fontWeight: 700, color: tone(r.v) }}>{sgn(r.v)}{r.grossOnly ? "*" : ""}</td>
+                  <td style={{ ...tdR, color: tone(r.nights) }}>{sgnN(r.nights)}</td>
+                  {month === "all" && <td style={td}>{chips(Object.fromEntries(Object.entries(r.months).map(([k, m]) => [k, val(m)])), mLab, 4)}</td>}
+                  <td style={td}>{Object.keys(r.channels).length ? chips(r.channels, (k) => k, 3) : <span style={{ color: C.faint }}>—</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {rows.length > 10 && (
+            <div className="ui" style={{ marginTop: 8 }}>
+              <button onClick={() => setShowAll(!showAll)} style={{ fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${C.border}`, background: "#fff", color: C.sub }}>{showAll ? "Show the latest 10" : `Show all ${rows.length} days`}</button>
+            </div>
+          )}
+          <div className="ui" style={{ fontSize: 11, color: C.faint, marginTop: 10, lineHeight: 1.5 }}>
+            Revenue follows the Net / Gross switch at the top. Channel figures are always gross (Cloudbeds and Hostfully report them that way).{anyGross ? " * Rows from before Oct 15, 2026 predate the net-of-fees switch and are shown gross." : ""}
+          </div>
+        </>
+      )}
+    </Panel>
   );
 }
 
